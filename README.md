@@ -2,6 +2,8 @@
 
 **把英雄联盟实时数据接进你原有的 DeepSeek Harness 对话，让你养的角色通过桌宠陪你玩。**
 
+演示视频：【我把大肥鱼拉到LOL当陪玩娘了】 https://www.bilibili.com/video/BV1axHV6EErM/?share_source=copy_web&vd_source=63af640136307ef4b250dddc1f4d121b
+
 插件读取本机 LOL 客户端和对局接口，将数据交给当前绑定的对话，再把模型的最终纯文本回复显示在桌宠气泡里。性格、知识、记忆和说什么，由原会话、用户及其已有工具决定。
 
 当前版本：**0.7.1**。运行环境：**Windows + DeepSeek Harness**；已验证宿主版本为 **0.2.1-rc.2**。
