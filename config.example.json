@@ -1,0 +1,12 @@
+{
+  "installRoots": ["E:\\WeGameApps\\英雄联盟", "D:\\WeGameApps\\英雄联盟"],
+  "logDirectories": [],
+  "discoverProcess": true,
+  "dataMode": "basic",
+  "pollIntervalMs": 1000,
+  "decisionIntervalMs": 15000,
+  "bubbleHoldMs": 5000,
+  "replyLength": 20,
+  "requestTimeoutMs": 2500,
+  "desktop": true
+}

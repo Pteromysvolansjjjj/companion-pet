@@ -1,0 +1,112 @@
+{
+  "source": "DSniang02.png",
+  "sourceSha256": "bfcdac201b183bd31cc154a9d5425dfa5c946fbbc4d6584b890b7e538776eb0d",
+  "derived": "DSniang02-character.png",
+  "derivedSha256": "b58149561da76ebef0a19607dd8fcf4abf40ebff479726f82fbcc7c8e6b1a004",
+  "method": "hand-traced supersampled alpha mask plus outside-connected pale-background cleanup; visible RGB unchanged; fully transparent RGB cleared; no generative redraw",
+  "originalPreserved": true,
+  "bubbleAndThoughtCirclesRemoved": true,
+  "outsideConnectedPalePixelsCleared": 0,
+  "contour": [
+    [
+      449,
+      1026
+    ],
+    [
+      449,
+      710
+    ],
+    [
+      500,
+      710
+    ],
+    [
+      500,
+      630
+    ],
+    [
+      577,
+      553
+    ],
+    [
+      615,
+      511
+    ],
+    [
+      641,
+      505
+    ],
+    [
+      648,
+      486
+    ],
+    [
+      650,
+      476
+    ],
+    [
+      658,
+      462
+    ],
+    [
+      670,
+      449
+    ],
+    [
+      688,
+      438
+    ],
+    [
+      708,
+      430
+    ],
+    [
+      729,
+      425
+    ],
+    [
+      750,
+      425
+    ],
+    [
+      773,
+      430
+    ],
+    [
+      792,
+      439
+    ],
+    [
+      807,
+      451
+    ],
+    [
+      818,
+      467
+    ],
+    [
+      823,
+      482
+    ],
+    [
+      826,
+      500
+    ],
+    [
+      850,
+      500
+    ],
+    [
+      850,
+      420
+    ],
+    [
+      1026,
+      420
+    ],
+    [
+      1026,
+      1026
+    ]
+  ]
+}

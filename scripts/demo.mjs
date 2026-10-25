@@ -1,0 +1,10 @@
+import { createDesktopBridge } from '../src/desktop.mjs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const desktop = createDesktopBridge({ root, onError: code => console.error(code) });
+if (!desktop.start()) process.exit(1);
+desktop.send({ type: 'status', text: '界面演示 · 未连接对话或游戏' });
+desktop.send({ type: 'reply', lines: ['这是第一条短句。', '人物常驻，气泡会淡出。'] });
+console.log('界面演示已启动。关闭演示窗口或按 Ctrl+C 结束。本演示不读取游戏，也不调用模型。');
+process.on('SIGINT', () => { desktop.close(); setTimeout(() => process.exit(0), 500); });

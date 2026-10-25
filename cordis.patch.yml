@@ -1,0 +1,4 @@
+- insert:
+    - id: lol-companion
+      name: dsh-plugin-lol-companion
+      config: {}

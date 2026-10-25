@@ -1,0 +1,63 @@
+{
+  "name": "dsh-plugin-lol-companion",
+  "version": "0.7.1",
+  "private": true,
+  "type": "module",
+  "description": "LOL 客户端与对局数据接入，以及原会话回复的 Windows 桌面气泡。",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src",
+    "dist",
+    "desktop",
+    "assets",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "ATTRIBUTION.md",
+    "VERIFICATION.md",
+    "config.example.json",
+    "docs",
+    "scripts",
+    "tests",
+    "LICENSE",
+    "CONTRIBUTING.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/game/*.test.mjs tests/host/*.test.mjs tests/client/*.test.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "probe": "node scripts/probe.mjs",
+    "demo": "node scripts/demo.mjs"
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.2 <0.3.0",
+    "zod": ">=4.4.3 <5"
+  },
+  "license": "MIT"
+}
