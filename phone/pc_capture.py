@@ -774,6 +774,28 @@ def make_handler(capture: Capture, config: dict):
                 self._send(200, jpeg, "image/jpeg",
                            {"x-seq": str(seq), "x-time": f"{at:.3f}"})
                 return
+            if path == "/full":
+                # 原尺寸帧，给录制器做 ROI 校准用。
+                # 直接从服务里取，不要另开一个 mss 实例——两个进程同时抓屏会互相拖慢。
+                quality = _int_arg(query.get("q", ["90"])[0], 90)
+                width = _int_arg(query.get("width", ["0"])[0], 0)
+                with capture.lock:
+                    frame = capture.full
+                if frame is None:
+                    self._json(503, {"error": "no frame yet"})
+                    return
+                shot = frame
+                if width and frame.shape[1] != width:
+                    out_h = max(2, int(round(frame.shape[0] * width / frame.shape[1])))
+                    shot = cv2.resize(frame, (width, out_h), interpolation=cv2.INTER_AREA)
+                ok, buffer = cv2.imencode(
+                    ".jpg", shot, [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(100, quality))])
+                if not ok:
+                    self._json(500, {"error": "encode failed"})
+                    return
+                self._send(200, buffer.tobytes(), "image/jpeg",
+                           {"x-size": f"{shot.shape[1]}x{shot.shape[0]}"})
+                return
             if path == "/info":
                 with capture.lock:
                     payload = {
