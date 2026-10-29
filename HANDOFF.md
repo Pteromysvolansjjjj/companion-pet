@@ -232,3 +232,75 @@ PC(Windows)                                         手机(iQOO Neo10 / 8 Gen 3 
 1. 读 `phone/pc_capture.py` 与 `client/pet.html`，确认现状；
 2. 扩展 `/tick` + `phone/fields.yaml`，用 `curl` 验证；
 3. 再动 Android 工程。
+
+## 13. 说话链路：PC 麦克风 → 手机陪玩（2026-10-29 下午）
+
+上游那套「F2 说话进 DSH 会话」在 fork 里是断的——它依赖 DSH 宿主会话，而手机端的
+对话是手机自己发起的。所以新做了一条：**PC 收语音 → 识别成文字 → 送到手机 → 手机交给 DeepSeek**。
+
+### 链路
+
+```
+按住 F2（RegisterHotKey，不是键盘钩子）
+  → sounddevice 录 16k 单声道 → 能量 VAD 断句
+  → faster-whisper small（本地 int8，462MB）→ 文字
+  → POST http://127.0.0.1:8770/say  {"text": "...", "source": "voice"}
+  → PC 的 SayQueue 排队（id 递增，带 epoch）
+  → 手机 /tick?say=<lastId> 增量取到
+  → 手机 DeepSeek.ask(payload, key, model, playerText) → 气泡回一句
+```
+
+关键取舍：
+
+- **PC 端不碰 DeepSeek，也不需要 API Key**，只负责把字送到；对话上下文全在手机。
+- 模型在 `vision/models/faster-whisper-small`，是**本地**的，音频不出网。
+- `VisionConfig.prompt` 可换词表：`pc_voice.py` 用的是 FPS 词表（包抄/架枪/补枪…），
+  上游默认仍是 LoL 词表。
+- 另一条零依赖的路：**采集服务的控制台窗口直接打字回车**（`source=typed`），
+  双击 exe 运行时那个黑窗口就是输入口。
+
+### 改过的文件
+
+| 文件 | 改动 |
+|---|---|
+| `phone/pc_capture.py` | `SayQueue` 类；`POST /say` 与 `GET /say?since=`；`/tick` 带 `say` + `sayEpoch`；控制台输入线程 |
+| `phone/pc_voice.py` | 新增。热键 + 录音 + 本地 Whisper → POST /say；`--wav` 离线自检、`--list-devices` |
+| `vision/lolvision/voice.py` | `VoiceConfig.prompt` 字段，`initial_prompt` 可覆盖 |
+| `android/.../Ticker.kt` | `Say` 数据类；`/tick` 带 `say=<lastId>`；`sayEpoch` 变了就把游标归零 |
+| `android/.../CompanionService.kt` | `handlePlayerTalk()`：收到玩家的话立刻回，不受点评间隔限制；气泡先回显「你：…」 |
+| `android/.../DeepSeek.kt` | `ask()` 增加 `playerText` 参数；兜底文案在玩家提问时先应一声 |
+
+### 实测
+
+- TTS 合成「对面中路有人，别贪这个兵」→ 识别成「对面中路有人 别贪这个兵」，2492ms。
+- `/say` 收发、`/tick` 增量、`sayEpoch` 全部验证过；`phone/selftest.py` 29/29。
+
+## 14. 瓦罗兰特 HUD 实测校准（2026-10-29 下午）
+
+用户给了两张真实对局截图（购买阶段 + 交战阶段，1920x1079），用**全图检测**而不是猜，
+把每个 HUD 数字的像素框定位出来，再换算成归一化坐标写进 `phone/profiles/valorant.yaml`。
+
+| 字段 | 读取 | 像素框 | 备注 |
+|---|---|---|---|
+| hp | 100 | x[577,654] y[1005,1049] | 左下大数字 |
+| shield | 100 | x[946,979] y[977,996] | 技能栏上方小数字 |
+| ammo | 12 | x[1280,1333] y[1008,1047] | 弹匣 |
+| ammoReserve | 36 | x[1355,1390] y[1015,1043] | 备弹 |
+| credits | 800 | x[1816,1869] y[1036,1057] | 经济 |
+| timer | 0:10 / 1:34 | x[926,996] y[27,72] | 回合计时 |
+| allyKills | 0 | x[818,828] | 低对比度，要 `enhance: bright` |
+| enemyKills | 0 | x[1095,1107] | 顶部分数 |
+
+三个坑（都已在代码里处理）：
+
+1. **弹药分隔符是弹匣图标**（三条竖杠），不是斜杠 → 拆成 `ammo` 与 `ammoReserve` 两个字段。
+2. **计时器冒号会被吞**：「1:34」在 1x 小图上读成「134」→ 新增 `looseClock: true`，
+   三位数按 M:SS 还原（94 秒）。Valorant 回合计时最长 2:59，三位数只可能是 M:SS。
+3. **顶部分数对比度极低**：直接识别只有 0.04 置信度 → 新增 `enhance: bright`
+   （灰度 + 高分位阈值抠亮字）+ `enhancePct`，能到 0.39–0.47。
+
+新增的字段选项：`enhance` / `enhancePct` / `looseClock`，都写在 `phone/pc_capture.py` 的
+`FieldSpec` 里，`build_specs` 负责从 yaml 读进来。
+
+校准后 `valorant.yaml` 的 `calibrated` 改成 **true**。两张截图实测：9 个字段全部读对，
+持刀时弹药正确进 `unstable`。LoL 与三角洲档位仍是占位值（false）。
