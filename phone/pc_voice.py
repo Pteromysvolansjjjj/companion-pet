@@ -46,16 +46,18 @@ def app_dir() -> Path:
 def find_model(explicit: str = "") -> Path | None:
     """按顺序找 faster-whisper 模型目录。
 
-    打包后模型放在 exe 同级的 ``voice/faster-whisper-small``——
-    462MB 的模型不进 exe，既省体积也省一次下载。
+    默认用 **base**：实测同一句 3.7 秒中文，base 转写 636ms、small 要 1983ms，
+    快 3.1 倍，代价只是偶尔一个同音字（贪->摊）。陪玩场景里延迟比字准更重要，
+    想更准就加 --model 指向 small。
     """
     if explicit:
         candidate = Path(explicit)
         return candidate if candidate.exists() else None
-    for candidate in (app_dir() / "voice" / "faster-whisper-small",
-                      ROOT / "vision" / "models" / "faster-whisper-small"):
-        if candidate.exists():
-            return candidate
+    for name in ("faster-whisper-base", "faster-whisper-small"):
+        for candidate in (app_dir() / "voice" / name,
+                          ROOT / "vision" / "models" / name):
+            if candidate.exists():
+                return candidate
     return None
 
 

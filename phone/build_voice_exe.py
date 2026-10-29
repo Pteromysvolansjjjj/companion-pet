@@ -22,8 +22,11 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 PYTHON = ROOT / "vision" / ".venv" / "Scripts" / "python.exe"
 WORK = ROOT / "logs" / "pyinstaller"
-MODEL_SRC = ROOT / "vision" / "models" / "faster-whisper-small"
-MODEL_DST = HERE / "voice" / "faster-whisper-small"
+MODEL_CANDIDATES = [
+    ROOT / "vision" / "models" / "faster-whisper-base",
+    ROOT / "vision" / "models" / "faster-whisper-small",
+]
+
 
 
 def main() -> int:
@@ -38,9 +41,10 @@ def main() -> int:
         subprocess.run([str(PYTHON), "-m", "pip", "install", "-q", "pyinstaller",
                         "--index-url", "https://pypi.org/simple"], check=True)
 
-    if not MODEL_SRC.exists():
-        print(f"找不到模型 {MODEL_SRC}")
-        print("去 docs/VOICE.md 看模型下载方式")
+    MODEL_SRC = next((p for p in MODEL_CANDIDATES if p.exists()), None)
+    if MODEL_SRC is None:
+        print("找不到 faster-whisper 模型目录")
+        print("  应该放在 vision/models/faster-whisper-base 或 faster-whisper-small")
         return 2
 
     WORK.mkdir(parents=True, exist_ok=True)
@@ -86,6 +90,8 @@ def main() -> int:
         return 1
 
     # 模型放到 exe 同级
+    # 模型放到 exe 同级，目录名跟着源目录（base / small）
+    MODEL_DST = HERE / "voice" / MODEL_SRC.name
     if MODEL_DST.exists():
         shutil.rmtree(MODEL_DST)
     MODEL_DST.parent.mkdir(parents=True, exist_ok=True)
