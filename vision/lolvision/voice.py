@@ -291,7 +291,10 @@ class VoiceService:
                 model = self._load_model()
                 segments, info = model.transcribe(
                     audio, language=self.config.language or None, beam_size=1,
-                    vad_filter=False, condition_on_previous_text=False,
+                    # 必须开 VAD：常开录音里大量是静音，Whisper 会在静音上做幻觉
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 200},
+                    condition_on_previous_text=False,
                     initial_prompt=self.config.prompt or DEFAULT_PROMPT,
                 )
                 text = "".join(segment.text for segment in segments).strip()

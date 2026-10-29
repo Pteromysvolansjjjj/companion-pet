@@ -38,5 +38,8 @@ node_modules/
 
 # 打包产物与本地配置（exe 约 96MB，不该入库）
 /phone/LolCompanionPet.exe
+/phone/LolCompanionVoice.exe
+# 语音模型：462MB，放在 exe 同级供它读取，不入库
+/phone/voice/
 /phone/pet.json
 /phone/*.spec

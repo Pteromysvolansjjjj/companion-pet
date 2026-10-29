@@ -62,6 +62,13 @@ def app_dir() -> Path:
 
 APP_DIR = app_dir()
 ROOT = APP_DIR.parent if not getattr(sys, "frozen", False) else APP_DIR
+
+try:
+    from lolvision.console import fix_console_encoding
+
+    fix_console_encoding()
+except Exception:  # noqa: BLE001 - 编码修复失败也要能跑
+    pass
 sys.path.insert(0, str(ROOT / "vision"))
 
 APK_DIR = APP_DIR / "dist"
@@ -247,6 +254,9 @@ def _clean(text: str) -> str:
     table = str.maketrans({
         "０": "0", "１": "1", "２": "2", "３": "3", "４": "4", "５": "5", "６": "6",
         "７": "7", "８": "8", "９": "9", "：": ":", "／": "/", "．": ".", "－": "-",
+        # Whisper 偶尔输出全角标点（U+FE50 小写逗号之类），转成半角
+        "﹑": ",", "﹐": ",", "，": ",", "。": ".", "、": ",", "！": "!", "？": "?",
+        "；": ";", "（": "(", "）": ")", "％": "%", "＄": "$", "～": "~",
     })
     return re.sub(r"\s+", " ", str(text or "").translate(table)).strip()
 
@@ -977,7 +987,7 @@ def main() -> int:
     print(f"  APK {apk.name} ({apk.stat().st_size / 1024 / 1024:.1f} MB)" if apk
           else "  APK 尚未生成（dist 目录为空）")
     print(f"  说话  在这个窗口打字回车 -> 手机的陪玩会回应")
-    print(f"        麦克风说话：另开一个窗口跑 phone\\pc_voice.py（按住 {settings.get('voiceHotkey', 'F2')}）")
+    print(f"        麦克风：双击同目录的 LolCompanionVoice.exe（全程录音，免按键）")
     print(f"  配置 {SETTINGS_FILE.name}  按 Ctrl-C 停止")
     print("=" * 58)
 
