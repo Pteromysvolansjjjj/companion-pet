@@ -208,9 +208,16 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * 模型要写进哪个档位。
+     *
+     * 自动跟随时不能写死 lol——PC 报的是 valorant 就得写 valorant.tflite，
+     * 否则服务按档位找不到模型，只会「仅对话」。
+     */
     private fun targetProfile(): String {
         val mode = prefs.profileMode
-        return if (mode == Prefs.PROFILE_AUTO) "lol" else mode
+        if (mode != Prefs.PROFILE_AUTO) return mode
+        return prefs.lastProfile.ifBlank { "lol" }
     }
 
     private fun profileLabel(mode: String): String = when (mode) {

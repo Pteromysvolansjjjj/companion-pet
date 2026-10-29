@@ -37,6 +37,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_AUTO_START, false)
         set(value) = sp.edit { putBoolean(KEY_AUTO_START, value) }
 
+    /** PC 端最近一次上报的档位，自动模式下决定模型导入到哪个文件。 */
+    var lastProfile: String
+        get() = sp.getString(KEY_LAST_PROFILE, "") ?: ""
+        set(value) = sp.edit { putString(KEY_LAST_PROFILE, value.trim()) }
+
     /**
      * 用哪个游戏档位：`auto` 跟随 PC 端 `/tick` 里的 profile，
      * `none` 强制只对话不加载模型，其余值强制指定档位。
@@ -65,6 +70,7 @@ class Prefs(context: Context) {
         private const val KEY_INTERVAL = "intervalSec"
         private const val KEY_AUTO_START = "autoStart"
         private const val KEY_PROFILE = "profileMode"
+        private const val KEY_LAST_PROFILE = "lastProfile"
         const val DEFAULT_DS_MODEL = "deepseek-flash"
         const val PROFILE_AUTO = "auto"
         const val PROFILE_NONE = "none"

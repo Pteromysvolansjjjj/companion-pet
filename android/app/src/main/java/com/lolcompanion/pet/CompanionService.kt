@@ -101,6 +101,7 @@ class CompanionService : Service() {
             }
         }
         var loadedProfile = profile
+        prefs.lastProfile = profile
         loadDetector(store, profile)
 
         var lastSpokeAt = 0L
@@ -122,6 +123,7 @@ class CompanionService : Service() {
                 ) {
                     loadedProfile = tick.profile
                     profile = tick.profile
+                    prefs.lastProfile = profile
                     loadDetector(store, profile)
                 }
 
