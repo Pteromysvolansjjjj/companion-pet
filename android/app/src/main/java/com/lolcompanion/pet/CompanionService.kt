@@ -50,6 +50,12 @@ class CompanionService : Service() {
     /** 上一次「发现敌人」事件的时刻，用于刷屏冷却。 */
     private var lastEnemyEventAt = 0L
 
+    /** 上一次发给 DeepSeek 时的状态指纹，用来判断「有没有新信息」。 */
+    private var lastStateKey = ""
+
+    /** 上一次真正调用 DeepSeek 的时刻，用于最小间隔。 */
+    private var lastAskAt = 0L
+
     /** 最近说过的话，防复读。 */
     private val recentSpoken = mutableListOf<String>()
 
@@ -227,8 +233,17 @@ class CompanionService : Service() {
                         kind == "allyKillsChange" || kind == "enemyKillsChange" ||
                         kind == "enemySpotted"
                 }
+                // 变化驱动：不再按固定频率往 DeepSeek 灌内容。
+                // 画面几秒不动时（补枪、架点），状态指纹不变就不发，
+                // 省下的都是纯浪费的 token。
+                val finger = sceneFingerprint(values, objects)
+                val changed = finger != lastStateKey
+                val minGapOk = System.currentTimeMillis() - lastAskAt >= MIN_ASK_GAP_MS
                 val due = notable ||
-                    System.currentTimeMillis() - lastSpokeAt >= prefs.intervalSec * 1000L
+                    (changed && minGapOk) ||
+                    // 兜底用 lastAskAt 而不是 lastSpokeAt：被复读保护拦下时
+                    // lastSpokeAt 不更新，会导致每轮都重新问一次 API。
+                    System.currentTimeMillis() - lastAskAt >= prefs.intervalSec * 1000L
                 if (emptyHud && objects.isEmpty()) {
                     PetBus.status("已连接，画面里还没有可读数字")
                     sleep(POLL_IDLE_MS)
@@ -243,6 +258,8 @@ class CompanionService : Service() {
                 PetBus.stats(buildStats(profile, values, objects))
 
                 if (due && !answeredPlayer) {
+                    lastAskAt = System.currentTimeMillis()
+                    lastStateKey = finger
                     val payload = broadcastPayload(profile, values, objects, events)
                     val (text, source) = DeepSeek.ask(
                         payload, prefs.apiKey, prefs.deepseekModel, null, chatHistory
@@ -303,6 +320,28 @@ class CompanionService : Service() {
         } catch (error: Throwable) {
             PetBus.status("模型 $profile 加载失败：${error.message ?: error.javaClass.simpleName}")
         }
+    }
+
+    /**
+     * 当前状态的指纹：只要这些值都没变，就没必要再问一次 DeepSeek。
+     *
+     * 用整数和短标签拼接，比 JSON 快，只用来做相等比较。
+     */
+    private fun sceneFingerprint(
+        values: JSONObject,
+        objects: List<Triple<String, Int, String>>
+    ): String {
+        val sb = StringBuilder(64)
+        for (name in listOf("hp", "shield", "ammo", "ammoReserve",
+                            "timer", "allyKills", "enemyKills", "level")) {
+            if (values.has(name)) {
+                sb.append(name).append('=').append(values.optInt(name)).append(';')
+            }
+        }
+        for ((label, count, region) in objects) {
+            sb.append(label).append(':').append(count).append(region).append(';')
+        }
+        return sb.toString()
     }
 
     // ------------------------------------------------------------ 记忆
@@ -798,6 +837,16 @@ class CompanionService : Service() {
         private const val CHANNEL_ID = "companion"
         private const val NOTIFICATION_ID = 1001
         private const val POLL_MIN_MS = 320L
+
+        /**
+         * 两次 DeepSeek 调用之间的最小间隔。
+         *
+         * 手机 320ms 拉一次数据，如果每帧有变化就发，一小时上万次请求
+         * （约 ¥11/小时）。压到 4 秒一次，成本仍是 ¥0.3/小时量级，
+         * 而人的反应也跟不上更快的节奏。
+         * 死亡/敌人露头这类事件不受这个限制。
+         */
+        private const val MIN_ASK_GAP_MS = 4_000L
         private const val POLL_IDLE_MS = 220L
         /**
          * YOLO 检测间隔的兜底值。
