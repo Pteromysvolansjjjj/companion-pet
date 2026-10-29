@@ -93,6 +93,7 @@ class VoiceService:
         self._stream = None
         self._model = None
         self._model_lock = threading.Lock()
+        self._stt_lock = threading.Lock()
         self._stop = threading.Event()
         self._record_thread = None
         self._hotkey_thread = None
@@ -280,29 +281,48 @@ class VoiceService:
             self._model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=2)
             return self._model
 
+    def _transcribe(self, audio):
+        """同步转写一段音频，返回 ``(text, info)``。
+
+        用 _stt_lock 串行化：faster-whisper 的 model 实例不是线程安全的，
+        流式模式下「部分转写」和「最终转写」可能同时想用模型。
+        """
+        model = self._load_model()
+        with self._stt_lock:
+            segments, info = model.transcribe(
+                audio, language=self.config.language or None, beam_size=1,
+                # 必须开 VAD：常开录音里大量是静音，Whisper 会在静音上做幻觉
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 200},
+                condition_on_previous_text=False,
+                initial_prompt=self.config.prompt or DEFAULT_PROMPT,
+            )
+            return "".join(segment.text for segment in segments).strip(), info
+
     def _transcribe_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                audio, duration_ms, reason = self._job.get(timeout=0.2)
+                item = self._job.get(timeout=0.2)
             except queue.Empty:
                 continue
+            # 四元组代表「已经有现成文本，不用再转」
+            preset = None
+            if len(item) == 4:
+                audio, duration_ms, reason, preset = item
+            else:
+                audio, duration_ms, reason = item
             started = time.monotonic()
-            try:
-                model = self._load_model()
-                segments, info = model.transcribe(
-                    audio, language=self.config.language or None, beam_size=1,
-                    # 必须开 VAD：常开录音里大量是静音，Whisper 会在静音上做幻觉
-                    vad_filter=True,
-                    vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 200},
-                    condition_on_previous_text=False,
-                    initial_prompt=self.config.prompt or DEFAULT_PROMPT,
-                )
-                text = "".join(segment.text for segment in segments).strip()
-            except Exception as error:
-                self.emit({"type": "error", "scope": "voice", "code": "transcribe_failed",
-                           "message": f"语音识别失败：{error}"})
-                self._set_state("idle")
-                continue
+            if preset is not None:
+                text = preset
+                info = None
+            else:
+                try:
+                    text, info = self._transcribe(audio)
+                except Exception as error:
+                    self.emit({"type": "error", "scope": "voice", "code": "transcribe_failed",
+                               "message": f"语音识别失败：{error}"})
+                    self._set_state("idle")
+                    continue
             latency = int((time.monotonic() - started) * 1000)
             self._set_state("idle")
             cleaned = clean_transcript(text)
@@ -450,6 +470,170 @@ class AlwaysOnVoice(VoiceService):
         gate = max(self.floor * 0.6, float(np.max(energy)) * 0.25)
         voiced = int(np.count_nonzero(energy > gate))
         return int(voiced * frame / SAMPLE_RATE * 1000)
+
+
+class StreamingVoice(AlwaysOnVoice):
+    """用 Silero VAD 断句的常开录音（取代纯音量的能量 VAD）。
+
+    为什么值得换：能量 VAD 只看音量，分不清「句子中间的停顿」和「说完了」。
+    实测同一段中文「对面中路有人，别贪这个兵」——
+
+        能量 VAD(450ms)  切成两段：「对面中路」+「别摊着的」
+        Silero VAD       连续一段：0.00 - 3.18s
+
+    被切句的后果不只是识别变差：缓冲区被重置，后面什么也接不上。
+
+    关于「边说边转」：`_partial_loop` 保留了但**默认不启动**。实测转写 2.7 秒
+    音频要 ~500ms，最新的部分结果永远落后 500-800ms，而断句阈值只有 450ms，
+    复用的条件几乎不可能满足。等以后换真正的流式模型再启用。
+
+    起音仍然用音量（便宜、灵敏度可用 --floor 调），只有断句换成 Silero。
+    """
+
+    def __init__(self, config: VoiceConfig, emit, log=None) -> None:
+        super().__init__(config, emit, log)
+        self.partial_every_ms = 500    # 保留字段，兼容旧调用
+        self.partial_min_ms = 800
+        self._partial_text = ""
+        self._partial_ms = 0
+        self._partial_thread = None
+        self._silero_at = 0.0
+        self._silero_ms = 200          # 多久用 Silero 判一次
+        self._silero_ok = True         # Silero 可用性
+
+    # ---------------------------------------------------------------- 判定
+    def _said_done(self) -> bool:
+        """整句话是不是已经说完了（用 Silero 判，不靠音量）。
+
+        为什么不能只看音量：实测同一段中文「对面中路有人，别贪这个兵」，
+        能量 VAD 在 450ms 阈值下把逗号停顿当成句尾，切成两段；
+        Silero 对整段音频的输出是连续的一段 0.00-3.18s。
+
+        代价：每次都要把从起音到现在的整段音频送进 Silero。3 秒音频约 10ms，
+        每 200ms 跑一次，占用可接受，换来的是「不切句 + 游戏音效不误触发」。
+        """
+        if not self._silero_ok or not self._buffers:
+            return False
+        try:
+            from faster_whisper.vad import VadOptions, get_speech_timestamps
+        except Exception:
+            self._silero_ok = False
+            return False
+
+        audio = np.concatenate(self._buffers)
+        if audio.size < int(SAMPLE_RATE * 0.6):
+            return False
+        try:
+            stamps = get_speech_timestamps(
+                audio, VadOptions(min_silence_duration_ms=450, speech_pad_ms=0))
+        except Exception:
+            self._silero_ok = False
+            return False
+        if not stamps:
+            return True
+        # 最后一段人声结束之后，又过了 450ms 没人说话
+        return (audio.size - stamps[-1]["end"]) >= int(SAMPLE_RATE * 0.45)
+
+    # ---------------------------------------------------------------- 采集
+    def _begin(self, now: float) -> None:
+        self._partial_text = ""
+        self._partial_ms = 0
+        self._silero_at = now
+        super()._begin(now)
+
+    def _on_audio(self, indata, _frames, _time_info, _status) -> None:
+        block = indata[:, 0].copy()
+        rms = float(np.sqrt(np.mean(block ** 2)))
+        now = time.monotonic()
+        gate = max(self.floor, self._noise * self.factor)
+
+        if not self._recording:
+            # 起音仍然看音量：便宜、灵敏，灵敏度还能用 --floor 调
+            self._noise = 0.97 * self._noise + 0.03 * rms
+            if rms >= gate:
+                self._begin(now)
+                self._buffers.append(block)
+            return
+
+        self._buffers.append(block)
+        if rms >= gate:
+            self._last_voice_at = now
+
+        # 断句交给 Silero：每 200ms 看一眼整段音频里人声是不是已经断了
+        if now - self._silero_at >= self._silero_ms / 1000.0:
+            self._silero_at = now
+            if self._said_done():
+                self._finish("silence")
+                return
+        if (now - self._record_started) * 1000 >= self.config.maxMs:
+            self._finish("max")
+
+    def _partial_loop(self) -> None:
+        """（保留但默认不启动）边说边转的部分结果。
+
+        实测结论：不划算。转写 2.7 秒音频要 ~500ms，所以最新的部分结果
+        永远比当前时刻落后 500-800ms，而断句阈值只有 450ms——追不上，
+        复用的条件几乎不可能满足。留着代码是为了以后换更快的模型
+        （或真正的流式模型）时能直接用。
+        """
+        while not self._stop.is_set():
+            time.sleep(self.partial_every_ms / 1000.0)
+            if not self._recording:
+                return
+            if self._model is None:
+                continue
+            snapshot = list(self._buffers)
+            if not snapshot:
+                continue
+            audio = np.concatenate(snapshot)
+            duration_ms = int(len(audio) / SAMPLE_RATE * 1000)
+            if duration_ms < self.partial_min_ms:
+                continue
+            if duration_ms <= self._partial_ms + 250:
+                continue
+            try:
+                text, _info = self._transcribe(np.ascontiguousarray(audio))
+            except Exception:  # noqa: BLE001
+                continue
+            if text:
+                self._partial_text = text
+                self._partial_ms = duration_ms
+
+    # ---------------------------------------------------------------- 断句
+    def _finish(self, reason: str) -> None:
+        if not self._recording:
+            return
+        self._recording = False
+        buffers, self._buffers = self._buffers, []
+        audio = np.concatenate(buffers) if buffers else np.zeros(0, dtype=np.float32)
+        speech_ms = self._speech_ms(audio)
+        if speech_ms < self.config.minMs:
+            self._set_state("listening")
+            return
+        total_ms = int(len(audio) / SAMPLE_RATE * 1000)
+
+        # 部分结果能覆盖到结尾就直接用（换更快模型时这条会命中）
+        if self._partial_text and self._partial_ms >= total_ms - 450:
+            self._set_state("transcribing")
+            self._job.put((np.zeros(0, dtype=np.float32), total_ms, reason,
+                           self._partial_text))
+            return
+
+        trimmed = trim_silence(audio, SAMPLE_RATE)
+        duration_ms = int(len(trimmed) / SAMPLE_RATE * 1000)
+        self._set_state("transcribing")
+        self._job.put((trimmed, duration_ms, reason))
+
+    def stop(self) -> None:
+        self._recording = False
+        super().stop()
+
+    def status(self) -> dict:
+        data = super().status()
+        data["mode"] = "stream"
+        data["partialText"] = self._partial_text
+        data["partialMs"] = self._partial_ms
+        return data
 
 
 def trim_silence(audio: np.ndarray, rate: int, threshold: float = 0.006) -> np.ndarray:

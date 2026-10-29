@@ -161,17 +161,21 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8770, help="PC 采集服务的端口")
     parser.add_argument("--hotkey", default="F2", help="按住说话的热键，如 F2 / Ctrl+Alt+F2")
-    parser.add_argument("--mode", choices=["always", "push", "toggle"], default="always",
-                        help="always=全程录音，一说话就录（默认）；push=按住热键说话；"
-                             "toggle=按一下开始、再按一下停")
+    parser.add_argument("--mode", choices=["always", "stream", "push", "toggle"],
+                        default="always",
+                        help="always=能量VAD断句（默认，最省 CPU）；"
+                             "stream=Silero VAD 断句（不切句、游戏音效不误触发，"
+                             "CPU 略高）；push=按住热键说话；toggle=按一下再按一下停")
+    parser.add_argument("--partial-every", type=int, default=500,
+                        help="流式模式下多久尝试一次部分转写（毫秒）")
     parser.add_argument("--floor", type=float, default=0.010,
                         help="always 模式的音量下限，调大可以少被游戏音效触发")
     parser.add_argument("--factor", type=float, default=2.6,
                         help="always 模式相对噪声底的倍数，调大更不容易误触发")
     parser.add_argument("--min-chars", type=int, default=2,
                         help="识别结果少于此字数就丢弃")
-    parser.add_argument("--silence-ms", type=int, default=450,
-                        help="静音多久算一句话说完（越小越快，但容易切断句子）")
+    parser.add_argument("--silence-ms", type=int, default=None,
+                        help="静音多久算一句话说完（流式默认 280，其它模式 450）")
     parser.add_argument("--model", default="", help="faster-whisper 模型目录（默认自动找）")
     parser.add_argument("--selftest", action="store_true",
                         help="录 5 秒转写一次，确认麦克风和模型都通")
@@ -181,7 +185,9 @@ def main() -> int:
     parser.add_argument("--wav", default="", help="离线转写一个 wav 就退出（自测用）")
     args = parser.parse_args()
 
-    from lolvision.voice import AlwaysOnVoice, VoiceConfig, VoiceService, list_devices
+    from lolvision.voice import (
+        AlwaysOnVoice, StreamingVoice, VoiceConfig, VoiceService, list_devices,
+    )
 
     if args.list_devices:
         devices = list_devices()
@@ -262,6 +268,11 @@ def main() -> int:
             print(f"  -> 发送失败：{error}（PC 采集服务在跑吗？）")
             return 1
 
+    # 流式模式已经有部分结果在手，静音判定可以更短，不用等 450ms 确认
+    # 实测：中文句子内部（逗号处）的停顿就有 400ms+，静音阈值低于 500 会把
+    # 一句话切成两段。所以流式也不能靠砍这个值换速度，两边都用 450。
+    silence_ms = args.silence_ms if args.silence_ms is not None else 450
+
     config = VoiceConfig(
         enabled=True,
         hotkey=args.hotkey,
@@ -270,7 +281,7 @@ def main() -> int:
         language=args.language,
         device=args.device,
         prompt=FPS_PROMPT,
-        silenceMs=args.silence_ms,
+        silenceMs=silence_ms,
         minMs=400,
         maxMs=12000,
     )
@@ -316,7 +327,12 @@ def main() -> int:
                 print(f"  -> 发送失败：{error}", flush=True)
                 return
 
-    if args.mode == "always":
+    if args.mode == "stream":
+        service = StreamingVoice(config, emit)
+        service.floor = args.floor
+        service.factor = args.factor
+        service.partial_every_ms = max(200, args.partial_every)
+    elif args.mode == "always":
         service = AlwaysOnVoice(config, emit)
         service.floor = args.floor
         service.factor = args.factor
@@ -327,23 +343,26 @@ def main() -> int:
     print("=" * 58)
     print("  PC 麦克风 -> 手机陪玩")
     print("=" * 58)
-    if args.mode == "always":
+    if args.mode == "stream":
+        print("  模式 Silero VAD 断句：不会把一句话从逗号处切断，游戏音效也不易误触发")
+        print(f"       音量下限 {args.floor}  静音断句 {silence_ms}ms")
+    elif args.mode == "always":
         print("  模式 全程录音：一说话就录，静下来自动断句，不用按任何键")
         print(f"       音量下限 {args.floor}  噪声倍数 {args.factor}  "
-              f"静音断句 {args.silence_ms}ms")
+              f"静音断句 {silence_ms}ms")
     else:
         print(f"  热键 {args.hotkey}（{'按住说话' if args.mode == 'push' else '按一下开始/再按一下停'}）")
     print(f"  模型 {model_path.name}  本地 CPU 识别，不上传音频")
     print(f"  目标 {base}/say")
     if status.get("error"):
-        if args.mode == "always":
+        if args.mode in ("always", "stream"):
             print(f"  [注意] {status['error']}：麦克风打不开，检查系统录音权限")
         else:
             print(f"  [注意] {status['error']}：热键可能已被别的程序占用，换 --hotkey 试试")
     print("  按 Ctrl-C 退出")
     print("=" * 58)
 
-    if args.mode == "always":
+    if args.mode in ("always", "stream"):
         # 模型没加载完之前说话是没人理的，明确等它就绪再提示
         print("  正在加载语音模型…", flush=True)
         load_started = time.monotonic()
