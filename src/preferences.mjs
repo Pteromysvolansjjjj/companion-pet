@@ -4,16 +4,31 @@ import { dirname, join } from 'node:path';
 export const preferenceDefaults = Object.freeze({
   pollIntervalMs: 1000, decisionIntervalMs: 15000, bubbleHoldMs: 5000, replyLength: 20,
   dataMode: 'basic',
+  // Where the game facts come from: local screen OCR by default in this fork.
+  dataSource: 'screen',
+  // Voice input: push-to-talk by default, recognised text echoed in the bubble.
+  voiceMode: 'push', voiceEcho: 'bubble', voiceHotkey: 'F2',
 });
 const ranges = {
   pollIntervalMs: [250, 2147483647], decisionIntervalMs: [500, 2147483647],
   bubbleHoldMs: [500, 30000], replyLength: [0, Number.MAX_SAFE_INTEGER],
 };
+const enums = {
+  dataMode: ['basic', 'detailed'],
+  dataSource: ['screen', 'api'],
+  voiceMode: ['push', 'toggle', 'off'],
+  voiceEcho: ['bubble', 'tray', 'off'],
+};
+const HOTKEY_PATTERN = /^[A-Za-z0-9+~`\-[\];',.\/]{1,32}$/;
 export function validatePreferences(input) {
   const result = {};
   for (const [key, value] of Object.entries(input)) {
-    if (key === 'dataMode') {
-      if (!['basic', 'detailed'].includes(value)) throw new Error('dataMode must be basic or detailed');
+    if (key === 'voiceHotkey') {
+      if (typeof value !== 'string' || !HOTKEY_PATTERN.test(value)) throw new Error('voiceHotkey must be a key combination such as F2 or Ctrl+Alt+F2');
+      result[key] = value; continue;
+    }
+    if (Object.hasOwn(enums, key)) {
+      if (!enums[key].includes(value)) throw new Error(`${key} must be one of ${enums[key].join('/')}`);
       result[key] = value; continue;
     }
     if (!Object.hasOwn(ranges, key)) throw new Error('Unknown LOL setting: ' + key);

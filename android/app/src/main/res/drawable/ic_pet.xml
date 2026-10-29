@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 简单的桌宠头像占位图标，避免引入二进制资源 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#101A30"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#6F8DFF"
+        android:pathData="M32,34 L40,20 L48,34 Z" />
+    <path
+        android:fillColor="#6F8DFF"
+        android:pathData="M60,34 L68,20 L76,34 Z" />
+    <path
+        android:fillColor="#E9F0FF"
+        android:pathData="M54,30 C38,30 28,42 28,56 C28,72 40,84 54,84 C68,84 80,72 80,56 C80,42 70,30 54,30 Z" />
+    <path
+        android:fillColor="#17203A"
+        android:pathData="M44,50 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+    <path
+        android:fillColor="#17203A"
+        android:pathData="M64,50 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+    <path
+        android:fillColor="#17203A"
+        android:pathData="M50,64 q4,5 8,0 q-4,3 -8,0 Z" />
+</vector>

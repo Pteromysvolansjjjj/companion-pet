@@ -1,0 +1,39 @@
+# phone/profiles/delta.yaml — 三角洲行动 HUD 字段（占位 ROI，未校准）
+#
+# 用法：python phone/pc_capture.py --profile delta
+# 同样是 FPS HUD，与 valorant 的差别在血量显示方式和没有护甲数字。
+# 全部是估算值，先跑 calibrate.py 校准。
+
+version: 1
+profile: delta
+name: 三角洲行动
+calibrated: false
+basis: { width: 1920, height: 1080 }
+
+ocr:
+  every_ms: 400
+  stale_ms: 1200
+  min_score: 0.30
+  threads: 3
+
+fields:
+  hp:
+    rect: [0.0180, 0.9100, 0.0700, 0.0360]
+    kind: int
+    min: 0
+    max: 200
+    purpose: 生命值
+  ammo:
+    rect: [0.8880, 0.9080, 0.0850, 0.0400]
+    kind: pair
+    purpose: 弹药 current/max
+  timer:
+    rect: [0.4600, 0.0140, 0.0800, 0.0360]
+    kind: clock
+    purpose: 对局/回合倒计时
+  squad:
+    rect: [0.0180, 0.8600, 0.0900, 0.0300]
+    kind: int
+    min: 0
+    max: 4
+    purpose: 存活队友数（HUD 小队栏）

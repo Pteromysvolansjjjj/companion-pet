@@ -4,8 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createLeagueConnector, createGameWatcher, createUpdateBatcher } from './game/index.mjs';
 import { createDesktopBridge } from './desktop.mjs';
-import { createReplyCollector, createSpeechContract } from './replies.mjs';
+import { createReplyCollector, createSpeechContract, paginateText } from './replies.mjs';
 import { createPreferenceStore, preferenceDefaults, validatePreferences } from './preferences.mjs';
+import { createVisionBridge } from './vision/bridge.mjs';
+import { createScreenConnector } from './vision/connector.mjs';
+import { createMobileBridge } from './mobile/server.mjs';
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const pluginVersion = JSON.parse(readFileSync(join(defaultRoot, 'package.json'), 'utf8')).version;
@@ -20,6 +23,9 @@ function loadConfig(root) {
 export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
   const root = deps.root || defaultRoot;
   const config = { ...loadConfig(root), ...supplied };
+  // An injected connector means the caller supplies the data path (tests, or a
+  // deployment that still prefers the interface); otherwise screen OCR is default.
+  if (config.dataSource === undefined && deps.connector) config.dataSource = 'api';
   const preferences = createPreferenceStore({ root, config, persist: deps.persistPreferences ?? deps.persistStatus !== false });
   const sessionId = agent => String(agent.session.id ?? agent.id);
   const connector = deps.connector || createLeagueConnector({
@@ -31,8 +37,38 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     requestTimeoutMs: config.requestTimeoutMs || 2500,
   });
   const desktop = deps.desktop || createDesktopBridge({ root, enabled: config.desktop !== false });
+  // The phone is a second screen for the same bubbles, not a separate client.
+  // An injected desktop bridge marks a test/deployment seam: do not bind a port.
+  const mobile = deps.mobile || createMobileBridge({
+    root,
+    enabled: config.mobile !== false && !deps.desktop,
+    port: Number(config.mobilePort) || 8790,
+  });
   const makeWatcher = deps.createWatcher || createGameWatcher;
   const makeBatcher = deps.createBatcher || createUpdateBatcher;
+  // Screen OCR is the default source in this fork; the interface connector stays
+  // available at runtime so a user can switch back without reinstalling.
+  const vision = deps.vision || createVisionBridge({
+    root,
+    enabled: config.vision !== false,
+    intervalMs: Number(config.visionIntervalMs) || 1000,
+    ...(config.visionPython ? { pythonPath: config.visionPython } : {}),
+    onError(code) { lastDiagnostic = code; record(); },
+  });
+  const screenConnector = deps.screenConnector || createScreenConnector({
+    bridge: vision, staleMs: Number(config.screenStaleMs) || 4000,
+  });
+  let activeSource = config.dataSource === 'api' ? 'api' : 'screen';
+  // Delegates so a preference change can swap sources without rebuilding the watcher.
+  const sourceConnector = {
+    read(options) {
+      if (activeSource === 'api') return connector.read(options);
+      return screenConnector.read(options);
+    },
+    get latestSnapshot() {
+      return activeSource === 'api' ? connector.latestSnapshot : screenConnector.latestSnapshot;
+    },
+  };
   let binding = null;
   let disposed = false;
   let disposeTask = null;
@@ -54,10 +90,13 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
       loaded: !disposed,
       watching: !!binding,
       boundSessionId: binding ? String(binding.agent.session.id ?? binding.agent.id) : null,
+      dataSource: activeSource,
       watcher: binding?.watcher?.status() ?? null,
       batching: binding?.batcher?.status() ?? null,
       preferences: binding ? { ...binding.preferences } : null,
       desktop: desktop.status(),
+      mobile: mobile.status(),
+      vision: { bridge: vision.status(), screen: screenConnector.status() },
       diagnostic: lastDiagnostic,
     };
   }
@@ -67,7 +106,7 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     try {
       mkdirSync(dirname(runtimeFile), { recursive: true });
       const summary = status();
-      writeFileSync(runtimeFile + '.tmp', JSON.stringify({ version: pluginVersion, loaded: summary.loaded, watching: summary.watching, desktop: summary.desktop, diagnostic: summary.diagnostic, updatedAt: new Date().toISOString() }, null, 2));
+      writeFileSync(runtimeFile + '.tmp', JSON.stringify({ version: pluginVersion, loaded: summary.loaded, watching: summary.watching, desktop: summary.desktop, mobile: summary.mobile, diagnostic: summary.diagnostic, updatedAt: new Date().toISOString() }, null, 2));
       renameSync(runtimeFile + '.tmp', runtimeFile);
     } catch { /* Status I/O cannot interrupt data delivery. */ }
   }
@@ -91,8 +130,12 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
       }
       await previous.watcher.stop();
     }
+    vision.setOcr(false);
+    vision.stopVoice();
     desktop.send({ type: 'clear' }, { launch: false });
     desktop.send({ type: 'status', text: '监听已停止' }, { launch: false });
+    mobile.send({ type: 'clear' });
+    mobile.send({ type: 'status', text: '监听已停止' });
     sendPreferences();
     record();
   }
@@ -114,7 +157,9 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
         if (binding !== current) return;
         current.playbackBusy = message.type === 'reply' && typeof desktop.onPlayback === 'function';
         syncBusy(current);
-        const sent = desktop.send(message.type === 'reply' ? { ...message, holdMs: current.preferences.bubbleHoldMs } : message);
+        const payload = message.type === 'reply' ? { ...message, holdMs: current.preferences.bubbleHoldMs } : message;
+        const sent = desktop.send(payload);
+        mobile.send(payload);
         if (sent === false) { current.playbackBusy = desktop.status().playback === true; syncBusy(current); }
       }, { onInvalid() {
         lastDiagnostic = 'speech_format_invalid'; record();
@@ -153,7 +198,7 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
       }));
     }
     current.watcher = makeWatcher({
-      connector,
+      connector: sourceConnector,
       intervalMs: current.preferences.pollIntervalMs,
       dataMode: current.preferences.dataMode,
       async onUpdate(update, { signal } = {}) {
@@ -163,12 +208,63 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     });
     binding = current;
     desktop.start();
+    mobile.start();
     desktop.send({ type: 'clear' });
+    mobile.send({ type: 'clear' });
     desktop.send({ type: 'status', text: '已绑定当前对话 · 等待客户端数据' });
+    mobile.send({ type: 'status', text: '已绑定当前对话' });
     sendPreferences();
+    applySource(current);
     current.watcher.start();
     record();
     return status();
+  }
+  function applySource(current) {
+    activeSource = current.preferences.dataSource;
+    if (activeSource === 'screen') {
+      vision.start();
+      vision.setOcr(true);
+    } else {
+      vision.setOcr(false);
+    }
+    applyVoice(current);
+  }
+  function applyVoice(current) {
+    const preferences = current.preferences;
+    if (preferences.voiceMode === 'off') { vision.stopVoice(); return; }
+    vision.setVoice({
+      enabled: true,
+      hotkey: preferences.voiceHotkey,
+      mode: preferences.voiceMode,
+      model: config.voiceModel || 'small',
+      modelPath: config.voiceModelPath || join(root, 'vision', 'models', `faster-whisper-${config.voiceModel || 'small'}`),
+      language: config.voiceLanguage || 'zh',
+      ...(config.voiceDevice !== undefined ? { device: config.voiceDevice } : {}),
+    });
+  }
+  /** Ordinary human input into the bound conversation, from the input bar or voice. */
+  function submitManual(current, text) {
+    const input = sdk.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } });
+    current.manualMessageIds.add(input.id);
+    syncBusy(current);
+    try {
+      current.agent.followup(input);
+    } catch (error) {
+      current.manualMessageIds.delete(input.id);
+      syncBusy(current);
+      throw error;
+    }
+    if (typeof current.agent.whenIdle === 'function') {
+      const release = () => {
+        if (binding !== current || disposed) return;
+        current.manualMessageIds.delete(input.id);
+        if (current.turns.size === 0) current.modelBusy = false;
+        syncBusy(current);
+      };
+      // A cancelled input may never emit user/message; quiescence also releases it.
+      void current.agent.whenIdle().then(release, release);
+    }
+    return input;
   }
   function syncBusy(current) {
     current.batcher?.setBusy(current.modelBusy || current.playbackBusy || current.manualMessageIds.size > 0 || current.turns.size > 0 || (current.agent.status && current.agent.status !== 'idle'));
@@ -180,10 +276,13 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     });
   }
   function sendPreferences(requestId, error) {
-    desktop.send({ type: 'preferences', bindingId: binding?.id ?? null,
+    const payload = {
+      type: 'preferences', bindingId: binding?.id ?? null,
       values: binding ? { ...binding.preferences } : { ...preferenceDefaults },
       ...(requestId ? { requestId } : {}), ...(error ? { error } : {}),
-    }, { launch: false });
+    };
+    desktop.send(payload, { launch: false });
+    mobile.send(payload);
   }
   function applyPreferences(agent, changes) {
     if (disposed) throw new Error('LOL plugin is unloaded');
@@ -196,10 +295,13 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     const value = preferences.set(sessionId(agent), patch);
     const active = binding?.agent === agent;
     if (active && Object.keys(patch).length) {
+      const previous = binding.preferences;
       binding.preferences = value;
       binding.watcher.setIntervalMs(value.pollIntervalMs);
       binding.watcher.setDataMode(value.dataMode);
       binding.batcher.setIntervalMs(value.decisionIntervalMs);
+      if (value.dataSource !== previous.dataSource) applySource(binding);
+      else if (value.voiceMode !== previous.voiceMode || value.voiceHotkey !== previous.voiceHotkey) applyVoice(binding);
       updatePrompt(binding);
     }
     record();
@@ -256,34 +358,39 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     }
     let input;
     try {
-      input = sdk.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } });
-      current.manualMessageIds.add(input.id);
-      syncBusy(current);
-      // This is ordinary human input to the bound original Agent. followup()
-      // synchronously enqueues and wakes it, or queues its next turn while busy.
-      // It never waits for the automatic interval/bubble or interrupts the model.
-      current.agent.followup(input);
+      input = submitManual(current, text);
     } catch {
-      if (input) current.manualMessageIds.delete(input.id);
-      syncBusy(current);
       reject('当前对话未接收这条消息，请稍后重试。'); return;
     }
     const result = { ...reply, accepted: true };
     // Keep only a digest and acknowledgement; the Session owns actual user text.
     current.acceptedChatRequests.set(requestId, { fingerprint, result });
     sendChatResult(result);
-    if (typeof current.agent.whenIdle === 'function') {
-      const release = () => {
-        if (binding !== current || disposed) return;
-        current.manualMessageIds.delete(input.id);
-        if (current.turns.size === 0) current.modelBusy = false;
-        syncBusy(current);
-      };
-      // A cancelled input may never emit user/message. Quiescence also releases
-      // its pending guard, without deleting any genuine user input or history.
-      void current.agent.whenIdle().then(release, release);
-    }
   }).catch(() => {}));
+  const unsubscribeVoice = vision.on?.('voice', message => {
+    if (disposed || !binding) return;
+    const current = binding;
+    const text = typeof message?.text === 'string' ? message.text.trim() : '';
+    if (!text) {
+      desktop.send({ type: 'status', text: '🎤 没有听清，再说一次' }, { launch: false });
+      return;
+    }
+    if (text.length > 65536 || !text.isWellFormed()) return;
+    try {
+      submitManual(current, text);
+      lastDiagnostic = null;
+    } catch {
+      desktop.send({ type: 'status', text: '🎤 当前对话未接收这条语音' }, { launch: false });
+      return;
+    }
+    const echo = current.preferences.voiceEcho;
+    if (echo === 'bubble') {
+      desktop.send({ type: 'reply', lines: paginateText(text), holdMs: Math.min(current.preferences.bubbleHoldMs, 2500) });
+    } else if (echo === 'tray') {
+      desktop.send({ type: 'status', text: '🎤 ' + text }, { launch: false });
+    }
+    record();
+  });
   const unsubscribeReady = desktop.onReady?.(() => sendPreferences());
   const unsubscribePlayback = desktop.onPlayback?.(active => {
     if (!binding) return;
@@ -299,10 +406,10 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
   }
   addTool({
     name: 'lol_read',
-    description: '只读查询英雄联盟客户端及对局：账号资料、大厅房间和模式、匹配、选人、实时对局、赛后；返回实际数据与连接状态。不会开启监听，不修改游戏。',
-    parameters: { section: { type: 'string', description: '可选：all、phase、summoner、lobby、matchmaking、readyCheck、champSelect、endgame、gameflow、live；默认 all。' } },
+    description: '只读查询当前数据源。默认数据源是本地屏幕 OCR：返回 sections.screen（本轮识别的文字与字段）及映射后的 live 视图；切到接口档时返回客户端与对局接口数据。不会开启监听，不修改游戏。',
+    parameters: { section: { type: 'string', description: '可选：all、phase、summoner、lobby、matchmaking、readyCheck、champSelect、endgame、gameflow、live、screen；默认 all。' } },
     async execute(args, exec) {
-      const snapshot = await connector.read({ signal: exec.signal });
+      const snapshot = await sourceConnector.read({ signal: exec.signal });
       record();
       if (!args.section || args.section === 'all') return { snapshot, plugin: status() };
       if (!Object.hasOwn(snapshot.sections, args.section)) throw new Error('Unknown LOL data section');
@@ -324,6 +431,10 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
       dataMode: { type: 'string', description: '可选：basic主要数据（阶段、模式、选人、英雄、等级、KDA、存活状态及事件）；detailed详细数据（更多安全接口字段，含血量金币装备等）。未配置时默认basic，已有设置不变。两档自动快照都省略累计事件正文，保留全部新增事件及有界过程历史。只影响后续自动采样；原有缓存最后投递一次，lol_read仍可查全量。' },
       bubbleHoldMs: { type: 'number', description: '可选，每页气泡停留毫秒，整数500..30000；默认5000，另有淡入淡出各250毫秒。下一条回复开始生效。' },
       replyLength: { type: 'number', description: '可选，建议单次陪玩回复总字数，非负整数；默认20，0表示不限制总字数偏好。不是硬上限。' },
+      dataSource: { type: 'string', description: '可选：screen用本机屏幕OCR（默认，不调用游戏接口）或api用LCU/观战接口。切换立即生效，下一次采样开始使用新数据源。' },
+      voiceMode: { type: 'string', description: '可选：push按住热键说话、toggle按一下开始再按一下结束、off关闭语音输入。默认push。' },
+      voiceEcho: { type: 'string', description: '可选：bubble把识别出的文字先在气泡里回显（默认）、tray只写到托盘提示、off不回显。' },
+      voiceHotkey: { type: 'string', description: '可选，语音热键，例如F2、Ctrl+Alt+F2；默认F2。与游戏内按键冲突时改这里。' },
     },
     async execute(args, exec) {
       return serial(() => {
@@ -397,12 +508,15 @@ export function mountCompanion(ctx, sdk, supplied = {}, deps = {}) {
     disposeTask = serial(async () => {
       await stopNow();
       desktop.close();
+      await mobile.close();
+      vision.close();
       if (typeof unsubscribe === 'function') unsubscribe();
       if (typeof undispose === 'function') undispose();
       unsubscribePlayback?.();
       unsubscribePreferences?.();
       unsubscribeChatSubmit?.();
       unsubscribeReady?.();
+      unsubscribeVoice?.();
       for (const unregister of registered.splice(0)) unregister();
       record();
     });

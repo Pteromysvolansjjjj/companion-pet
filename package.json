@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-lol-companion",
-  "version": "0.7.1",
+  "version": "0.7.1-screen.1",
   "private": true,
   "type": "module",
   "description": "LOL 客户端与对局数据接入，以及原会话回复的 Windows 桌面气泡。",
@@ -45,10 +45,20 @@
     }
   },
   "scripts": {
-    "test": "node --test tests/game/*.test.mjs tests/host/*.test.mjs tests/client/*.test.mjs",
+    "test": "node --test tests/game/*.test.mjs tests/host/*.test.mjs tests/client/*.test.mjs tests/vision/*.test.mjs tests/mobile/*.test.mjs",
     "build:client": "node scripts/build-client.mjs",
     "probe": "node scripts/probe.mjs",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "vision:selftest": "node vision/run.mjs selftest.py",
+    "vision:voice": "node vision/run.mjs voice_test.py",
+    "vision:demo": "node scripts/screen-demo.mjs",
+    "vision:probe": "node vision/run.mjs probe.py",
+    "vision:voice-pipe": "node vision/run.mjs voice_pipe_test.py",
+    "vision:parse-tests": "node vision/run.mjs tests/test_parse.py",
+    "phone:selftest": "node vision/run.mjs ../phone/selftest.py",
+    "phone:capture": "node vision/run.mjs ../phone/pc_capture.py",
+    "phone:calibrate": "node vision/run.mjs ../phone/calibrate.py",
+    "phone:runner": "node vision/run.mjs ../phone/desktop_runner.py"
   },
   "engines": {
     "node": ">=22",

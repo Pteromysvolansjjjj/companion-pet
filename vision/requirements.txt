@@ -1,0 +1,13 @@
+# Runtime dependencies for the screen-OCR and voice sidecar.
+# Installed into vision/.venv by setup.ps1; never into the system interpreter.
+numpy>=2.0
+opencv-python-headless>=4.10
+mss>=9.0
+pillow>=10.0
+sounddevice>=0.4.7
+rapidocr-onnxruntime>=1.2.3
+faster-whisper>=1.0
+huggingface-hub>=0.24
+
+# Optional: only used by vision/voice_test.py to synthesise Chinese speech.
+# pywin32>=306

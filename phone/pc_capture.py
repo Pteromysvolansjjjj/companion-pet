@@ -1,0 +1,705 @@
+"""PC side: capture the screen, read the HUD numbers, serve one /tick to the phone.
+
+Three jobs, nothing else -- no model, no window, no AI:
+
+    capture   grab the screen at N FPS, keep one full-resolution frame
+    OCR       crop the ROIs from ``phone/fields.yaml``, read them, turn them into
+              numbers (this is the only place OCR happens in the whole system)
+    serve     GET /tick   frame + numbers in one payload
+              GET /frame  raw JPEG, kept for debugging
+              GET /info   counters
+              GET /apk    newest APK from phone/dist, for one-tap install
+
+    python phone/pc_capture.py                       # 全屏, 5 FPS, 宽 640
+    python phone/pc_capture.py --window-title 英雄联盟
+    python phone/pc_capture.py --source image --image vision/samples/synthetic-hud.png
+    python phone/pc_capture.py --no-ocr              # 只有画面, 跳过 RapidOCR
+
+``--source image`` replays a still image instead of the desktop.  That is how the
+whole chain is verified without the game running.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import re
+import socket
+import sys
+import threading
+import time
+from dataclasses import dataclass, field as dataclass_field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import cv2
+import numpy as np
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "vision"))
+
+APK_DIR = Path(__file__).resolve().parent / "dist"
+
+# Fallback used when fields.yaml is missing or unreadable.  Kept in sync with
+# the four fields that the default HUD really shows.
+FALLBACK_CONFIG: dict = {
+    "version": 1,
+    "calibrated": False,
+    "basis": {"width": 1920, "height": 1080},
+    "ocr": {"every_ms": 500, "stale_ms": 1500, "min_score": 0.30, "threads": 3},
+    "fields": {
+        "timer": {"rect": [0.4274, 0.0000, 0.1452, 0.0480], "kind": "clock"},
+        "allyKills": {"rect": [0.3350, 0.0048, 0.0660, 0.0384], "kind": "int", "max": 300},
+        "enemyKills": {"rect": [0.5990, 0.0048, 0.0660, 0.0384], "kind": "int", "max": 300},
+        "level": {"rect": [0.3720, 0.9050, 0.0280, 0.0400], "kind": "int", "min": 1, "max": 18},
+        "score": {"derive": ["allyKills", "enemyKills"]},
+    },
+}
+
+INT_RE = re.compile(r"(?<!\d)(\d{1,4})(?!\d)")
+PAIR_RE = re.compile(r"(?<!\d)(\d{1,4})\s*[/／|:：]\s*(\d{1,4})(?!\d)")
+CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{1,2})(?!\d)")
+BARE_CLOCK_RE = re.compile(r"(?<!\d)(\d{2})(\d{2})(?!\d)")
+FLOAT_RE = re.compile(r"(?<![\d.])(\d{1,3}\.\d{1,2})(?![\d.])")
+
+
+def tighten(image: np.ndarray) -> np.ndarray:
+    """Crop a HUD slot down to its ink.
+
+    RapidOCR is trained on tightly framed text.  Handing it a slot with 40 px of
+    empty margin on each side is what turns a lone "8" into "¥８" at 0.39
+    confidence; trimming first gives "8" at 0.35-0.50 and lifts multi-character
+    fields (23:41 went 0.64 -> 0.83).  A busy background just fails the ink test
+    and the original crop is returned unchanged.
+    """
+    if image is None or image.size == 0:
+        return image
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    _, mask = cv2.threshold(cv2.GaussianBlur(gray, (3, 3), 0), 0, 255,
+                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if mask.mean() > 127:  # dark text on a light HUD element
+        mask = cv2.bitwise_not(mask)
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 8:
+        return image
+    x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+    if (x1 - x0) < 4 or (y1 - y0) < 6:
+        return image
+    pad_x, pad_y = max(2, int((x1 - x0) * 0.08)), max(2, int((y1 - y0) * 0.10))
+    top, bottom = max(0, y0 - pad_y), min(image.shape[0], y1 + 1 + pad_y)
+    left, right = max(0, x0 - pad_x), min(image.shape[1], x1 + 1 + pad_x)
+    return image[top:bottom, left:right]
+
+
+def prepare(image: np.ndarray, target_height: int = 56) -> np.ndarray:
+    """Tighten, then scale the text up to roughly what the recogniser expects."""
+    image = tighten(image)
+    if image is None or image.size == 0:
+        return image
+    height = image.shape[0]
+    if height < target_height:
+        scale = min(4.0, target_height / max(1, height))
+        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    return image
+
+
+def lan_ip() -> str:
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        address = probe.getsockname()[0]
+        probe.close()
+        return address
+    except OSError:
+        return "127.0.0.1"
+
+
+# --------------------------------------------------------------------- fields
+@dataclass
+class FieldSpec:
+    name: str
+    rect: list[float] | None = None
+    kind: str = "int"
+    mode: str = "line"
+    regex: str | None = None
+    low: float | None = None
+    high: float | None = None
+    scale: float = 1.0
+    enabled: bool = True
+    derive: list[str] | None = None
+    purpose: str = ""
+    min_score: float | None = None
+    crop_tight: bool = True
+    pattern: re.Pattern | None = dataclass_field(default=None, repr=False)
+
+
+def load_config(path: Path) -> dict:
+    """Read a config file and overlay it on the fallback.
+
+    Two behaviours, decided by whether the file declares ``profile``:
+
+    * ``phone/fields.yaml`` (no ``profile`` key) — a partial file is allowed, its
+      fields are merged over the defaults, so deleting one entry keeps it working.
+    * ``phone/profiles/<name>.yaml`` — a complete game profile.  Its ``fields``
+      replace the defaults outright; otherwise LoL's timer/kills would be OCR'd
+      (and reported) while playing Valorant.
+    """
+    data: dict = {}
+    if path.exists():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as error:  # noqa: BLE001 - a broken yaml must not kill capture
+            print(f"[warn] {path.name} 解析失败，改用内置默认值: {error}")
+    config = json.loads(json.dumps(FALLBACK_CONFIG))
+    for key, value in data.items():
+        if key != "fields":
+            config[key] = value
+    if data.get("profile"):
+        config["fields"] = dict(data.get("fields") or {})
+        return config
+    config.setdefault("fields", {})
+    for name, entry in (data.get("fields") or {}).items():
+        base = config["fields"].get(name, {})
+        config["fields"][name] = {**base, **(entry or {})}
+    return config
+
+
+def build_specs(config: dict) -> tuple[list[FieldSpec], list[FieldSpec]]:
+    plain: list[FieldSpec] = []
+    derived: list[FieldSpec] = []
+    for name, entry in (config.get("fields") or {}).items():
+        entry = entry or {}
+        if entry.get("derive"):
+            derived.append(FieldSpec(name=name, derive=list(entry["derive"]),
+                                    purpose=entry.get("purpose", "")))
+            continue
+        spec = FieldSpec(
+            name=name,
+            rect=list(entry["rect"]) if entry.get("rect") else None,
+            kind=str(entry.get("kind") or "int").lower(),
+            mode=str(entry.get("mode") or "line").lower(),
+            regex=entry.get("regex"),
+            low=entry.get("min"),
+            high=entry.get("max"),
+            scale=float(entry.get("scale") or 1.0),
+            enabled=bool(entry.get("enabled", True)),
+            purpose=entry.get("purpose", ""),
+            min_score=entry.get("min_score"),
+            crop_tight=bool(entry.get("crop_tight", True)),
+        )
+        if spec.rect and spec.enabled:
+            if spec.regex:
+                try:
+                    spec.pattern = re.compile(spec.regex)
+                except re.error as error:
+                    print(f"[warn] 字段 {name} 的 regex 无效，改用 kind 解析: {error}")
+            plain.append(spec)
+    return plain, derived
+
+
+def _clean(text: str) -> str:
+    """Fold full-width digits/punctuation so OCR output parses as ASCII."""
+    table = str.maketrans({
+        "０": "0", "１": "1", "２": "2", "３": "3", "４": "4", "５": "5", "６": "6",
+        "７": "7", "８": "8", "９": "9", "：": ":", "／": "/", "．": ".", "－": "-",
+    })
+    return re.sub(r"\s+", " ", str(text or "").translate(table)).strip()
+
+
+def parse_value(spec: FieldSpec, text: str):
+    """Return ``(ok, value)`` for one field; ``ok`` false means "not readable"."""
+    cleaned = _clean(text)
+    if not cleaned:
+        return False, None
+
+    value = None
+    if spec.pattern is not None:
+        match = spec.pattern.search(cleaned)
+        if not match:
+            return False, None
+        try:
+            groups = match.groupdict()
+            if "a" in groups and "b" in groups:
+                value = [int(groups["a"]), int(groups["b"])]
+            elif "m" in groups and "s" in groups:
+                value = int(groups["m"]) * 60 + int(groups["s"])
+            elif "v" in groups:
+                value = float(groups["v"])
+            else:
+                raw = match.group(1) if match.groups() else match.group(0)
+                value = float(raw)
+        except (TypeError, ValueError):
+            # 用户写的可选命名组没匹配上，或组里不是数字
+            return False, None
+    elif spec.kind == "pair":
+        match = PAIR_RE.search(cleaned)
+        if match:
+            value = [int(match.group(1)), int(match.group(2))]
+        else:
+            numbers = [int(m.group(1)) for m in INT_RE.finditer(cleaned)][:2]
+            value = numbers if len(numbers) == 2 else None
+    elif spec.kind == "clock":
+        match = CLOCK_RE.search(cleaned)
+        if match:
+            value = int(match.group(1)) * 60 + int(match.group(2))
+        else:
+            match = BARE_CLOCK_RE.search(cleaned)
+            value = int(match.group(1)) * 60 + int(match.group(2)) if match else None
+    elif spec.kind == "float":
+        match = FLOAT_RE.search(cleaned)
+        value = float(match.group(1)) if match else None
+    elif spec.kind == "text":
+        value = cleaned
+    else:  # int
+        match = INT_RE.search(cleaned)
+        value = int(match.group(1)) if match else None
+
+    if value is None:
+        return False, None
+    if spec.scale != 1.0 and isinstance(value, (int, float)):
+        value = value * spec.scale
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+    if isinstance(value, (int, float)):
+        if spec.low is not None and value < spec.low:
+            return False, None
+        if spec.high is not None and value > spec.high:
+            return False, None
+    if isinstance(value, list):
+        if spec.high is not None and any(item > spec.high for item in value):
+            return False, None
+        if len(value) == 2 and value[1] and value[0] > value[1] and spec.kind == "pair":
+            # "100/87" is a mis-read of a current/max pair far more often than a real value.
+            value = [value[1], value[0]]
+    return True, value
+
+
+class HudReader:
+    """OCR thread body: turn one frame into ``{values, unstable, ms}``."""
+
+    def __init__(self, config: dict, specs: list[FieldSpec], derived: list[FieldSpec]) -> None:
+        from lolvision.ocr import OcrEngine
+
+        ocr = config.get("ocr") or {}
+        self.min_score = float(ocr.get("min_score", 0.30))
+        self.stale_ms = float(ocr.get("stale_ms", 1500))
+        self.every_ms = float(ocr.get("every_ms", 500))
+        self.engine = OcrEngine(min_score=self.min_score, threads=int(ocr.get("threads", 3)))
+        self.specs = specs
+        self.derived = derived
+        self.state: dict[str, dict] = {
+            spec.name: {"value": None, "ok": False, "at": 0.0, "text": "", "score": 0.0}
+            for spec in specs
+        }
+        self.last_ms = 0.0
+        self.reads = 0
+        self.failures = 0
+
+    def warmup(self) -> float:
+        try:
+            return self.engine.warmup()
+        except Exception as error:  # noqa: BLE001
+            print(f"[warn] OCR 预热失败: {type(error).__name__}: {error}")
+            return 0.0
+
+    def read(self, frame: np.ndarray, origin: tuple[int, int] = (0, 0)) -> dict:
+        from lolvision.layout import to_pixels
+
+        height, width = frame.shape[:2]
+        started = time.perf_counter()
+        fresh: dict[str, dict] = {}
+        for spec in self.specs:
+            x, y, w, h = to_pixels(spec.rect, (width, height), origin)
+            crop = frame[max(0, y):max(0, y + h), max(0, x):max(0, x + w)]
+            if crop.size and spec.crop_tight:
+                crop = prepare(crop)
+            lines = self.engine.read(crop, mode=spec.mode) if crop.size else []
+            threshold = spec.min_score if spec.min_score is not None else self.min_score
+            lines = [line for line in lines if line.score >= threshold]
+            text = " ".join(line.text for line in sorted(lines, key=lambda line: line.x))
+            score = max((line.score for line in lines), default=0.0)
+            ok, value = parse_value(spec, text)
+            previous = self.state.get(spec.name) or {}
+            if ok:
+                fresh[spec.name] = {"value": value, "ok": True, "at": time.time(),
+                                    "text": text, "score": round(score, 3)}
+            else:
+                # 这一帧读不出来：保留上一次的值，但 ok=False、at 不更新，
+                # snapshot 会把它放进 unstable，而不是让数字凭空消失。
+                fresh[spec.name] = {"value": previous.get("value"), "ok": False,
+                                    "at": previous.get("at", 0.0),
+                                    "text": text, "score": round(score, 3)}
+        self.last_ms = (time.perf_counter() - started) * 1000
+        self.reads += 1
+        self.state.update(fresh)
+        return self.snapshot()
+
+    def snapshot(self) -> dict:
+        now = time.time()
+        values: dict = {}
+        unstable: list[str] = []
+        detail: dict = {}
+        for spec in self.specs:
+            item = self.state.get(spec.name) or {}
+            age = (now - item.get("at", 0.0)) * 1000 if item.get("at") else None
+            has_value = item.get("ok") and item.get("value") is not None
+            if has_value:
+                values[spec.name] = item["value"]
+                if age is None or age > self.stale_ms:
+                    unstable.append(spec.name)
+            elif item.get("value") is not None:
+                # Reported earlier but not readable now: keep it, flagged.
+                values[spec.name] = item["value"]
+                unstable.append(spec.name)
+            detail[spec.name] = {
+                "text": item.get("text", ""),
+                "score": item.get("score", 0.0),
+                "ageMs": round(age) if age is not None else None,
+            }
+        for spec in self.derived:
+            items = [values.get(name) for name in (spec.derive or [])]
+            if all(isinstance(item, int) for item in items):
+                values[spec.name] = list(items)
+                if any(name in unstable for name in (spec.derive or [])):
+                    unstable.append(spec.name)
+        if self.reads and not values:
+            self.failures += 1
+        return {"values": values, "unstable": unstable, "ms": round(self.last_ms, 1),
+                "detail": detail}
+
+
+# -------------------------------------------------------------------- capture
+class Capture:
+    def __init__(self, options: argparse.Namespace) -> None:
+        self.options = options
+        self.width = options.width
+        self.quality = options.quality
+        self.window_title = (options.window_title or "").lower().strip()
+        self.interval = 1.0 / max(0.5, options.fps)
+        self.monitor = options.monitor
+        self.source = options.source
+        self.lock = threading.Lock()
+        self.jpeg: bytes = b""
+        self.sequence = 0
+        self.captured_at = 0.0
+        self.capture_ms = 0.0
+        self.frames = 0
+        self.error: str | None = None
+        self.full: np.ndarray | None = None
+        self.full_seq = 0
+        self.full_size = (0, 0)
+        self.sent_size = (0, 0)
+        self.ocr_result: dict = {"values": {}, "unstable": [], "ms": 0.0, "detail": {}}
+        self.ocr_seq = 0
+        self.ocr_at = 0.0
+        self._stop = threading.Event()
+        self._mss = None
+        self._image: np.ndarray | None = None
+        if self.source == "image":
+            image_path = Path(options.image or "")
+            self._image = cv2.imread(str(image_path))
+            if self._image is None:
+                raise SystemExit(f"读不到图片: {image_path}")
+
+    def _region(self):
+        if self.window_title and self._mss is not None:
+            try:
+                from lolvision.capture import find_windows
+
+                for window in find_windows():
+                    if self.window_title in (window.title or "").lower():
+                        return {"left": window.x, "top": window.y,
+                                "width": window.width, "height": window.height}
+            except Exception:
+                pass
+        bounds = self._mss.monitors[self.monitor]
+        return {"left": bounds["left"], "top": bounds["top"],
+                "width": bounds["width"], "height": bounds["height"]}
+
+    def _grab(self) -> np.ndarray | None:
+        if self._image is not None:
+            return self._image
+        shot = self._mss.grab(self._region())
+        raw = np.frombuffer(shot.bgra, dtype=np.uint8).reshape((shot.height, shot.width, 4))
+        return cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+
+    def loop(self) -> None:
+        if self.source == "image":
+            print(f"[capture] 图片源: {self.options.image} {self._image.shape[1]}x{self._image.shape[0]}")
+        else:
+            import mss
+
+            self._mss = mss.mss()
+        while not self._stop.is_set():
+            started = time.perf_counter()
+            try:
+                frame = self._grab()
+                if frame is None:
+                    raise RuntimeError("grab returned nothing")
+                height, width = frame.shape[:2]
+                scaled = frame
+                if self.width and width != self.width:
+                    out_h = max(2, int(round(height * self.width / width)))
+                    scaled = cv2.resize(frame, (self.width, out_h), interpolation=cv2.INTER_AREA)
+                ok, buffer = cv2.imencode(".jpg", scaled,
+                                          [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
+                if ok:
+                    jpeg = buffer.tobytes()
+                    with self.lock:
+                        self.jpeg = jpeg
+                        self.sequence += 1
+                        self.captured_at = time.time()
+                        self.full = frame
+                        self.full_seq = self.sequence
+                        self.full_size = (width, height)
+                        self.sent_size = (scaled.shape[1], scaled.shape[0])
+                        self.frames += 1
+                        self.error = None
+            except Exception as error:  # noqa: BLE001
+                with self.lock:
+                    self.error = f"{type(error).__name__}: {error}"
+            spent = time.perf_counter() - started
+            self.capture_ms = spent * 1000
+            time.sleep(max(0.0, self.interval - spent))
+
+    def ocr_loop(self, reader: HudReader) -> None:
+        warm = reader.warmup()
+        print(f"[ocr] 预热 {warm:.0f} ms，字段 {len(reader.specs)} 个 + 派生 {len(reader.derived)} 个")
+        while not self._stop.is_set():
+            with self.lock:
+                seq, frame, size = self.full_seq, self.full, self.full_size
+            if frame is None or seq == self.ocr_seq:
+                time.sleep(0.03)
+                continue
+            gap = reader.every_ms / 1000.0 - (time.perf_counter() - self.ocr_at)
+            if gap > 0:
+                time.sleep(min(gap, 0.2))
+                continue
+            try:
+                result = reader.read(frame)
+            except Exception as error:  # noqa: BLE001 - OCR must never kill capture
+                result = {"values": {}, "unstable": [], "ms": 0.0,
+                          "detail": {}, "error": f"{type(error).__name__}: {error}"}
+            with self.lock:
+                self.ocr_result = result
+                self.ocr_seq = seq
+                self.ocr_at = time.perf_counter()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+# --------------------------------------------------------------------- server
+def newest_apk() -> Path | None:
+    if not APK_DIR.is_dir():
+        return None
+    candidates = [path for path in APK_DIR.glob("*.apk") if path.is_file()]
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
+def make_handler(capture: Capture, config: dict):
+    ocr_enabled = bool(config.get("_ocr_enabled"))
+    calibrated = bool(config.get("calibrated"))
+    profile = str(config.get("profile") or config.get("_profile") or "lol").lower()
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "lolcompanion-capture/2"
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args):
+            return
+
+        def _send(self, code: int, body: bytes, content_type: str, extra: dict | None = None):
+            self.send_response(code)
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(len(body)))
+            self.send_header("access-control-allow-origin", "*")
+            self.send_header("cache-control", "no-store")
+            for key, value in (extra or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _json(self, code: int, payload: dict, extra: dict | None = None):
+            self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8", extra)
+
+        def do_HEAD(self):  # noqa: N802
+            self.do_GET()
+
+        def do_GET(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+
+            if path == "/tick":
+                self._tick(query)
+                return
+            if path == "/frame":
+                with capture.lock:
+                    jpeg, seq, at = capture.jpeg, capture.sequence, capture.captured_at
+                if not jpeg:
+                    self._json(503, {"error": "no frame yet"})
+                    return
+                self._send(200, jpeg, "image/jpeg",
+                           {"x-seq": str(seq), "x-time": f"{at:.3f}"})
+                return
+            if path == "/info":
+                with capture.lock:
+                    payload = {
+                        "frames": capture.frames,
+                        "sequence": capture.sequence,
+                        "jpegBytes": len(capture.jpeg),
+                        "captureMs": round(capture.capture_ms, 1),
+                        "fps": round(1.0 / capture.interval, 1),
+                        "width": capture.width,
+                        "sourceSize": list(capture.full_size),
+                        "source": capture.source,
+                        "profile": profile,
+                        "error": capture.error,
+                        "ocr": {"enabled": ocr_enabled, "lastSeq": capture.ocr_seq,
+                                "ms": capture.ocr_result.get("ms"),
+                                "values": capture.ocr_result.get("values"),
+                                "unstable": capture.ocr_result.get("unstable"),
+                                "error": capture.ocr_result.get("error")},
+                        "apk": (newest_apk().name if newest_apk() else None),
+                    }
+                self._json(200, payload)
+                return
+            if path == "/fields":
+                self._json(200, {"profile": profile,
+                                 "calibrated": calibrated,
+                                 "fields": config.get("fields", {}),
+                                 "ocr": config.get("ocr", {})})
+                return
+            if path == "/apk":
+                apk = newest_apk()
+                if apk is None:
+                    self._json(404, {"error": "phone/dist 下没有 apk",
+                                     "hint": "把 assembleDebug 的产物拷到 phone/dist/"})
+                    return
+                body = apk.read_bytes()
+                self._send(200, body, "application/vnd.android.package-archive",
+                           {"content-disposition": f'attachment; filename="{apk.name}"'})
+                return
+            if path == "/apk/info":
+                apk = newest_apk()
+                if apk is None:
+                    self._json(404, {"error": "no apk"})
+                    return
+                stat = apk.stat()
+                self._json(200, {"name": apk.name, "bytes": stat.st_size,
+                                 "mtime": int(stat.st_mtime)})
+                return
+            self._json(404, {"error": "not found", "paths": ["/tick", "/frame", "/info",
+                                                            "/fields", "/apk", "/apk/info"]})
+
+        def _tick(self, query: dict) -> None:
+            since = query.get("since", [None])[0]
+            want_image = query.get("image", ["1"])[0] not in ("0", "false", "no")
+            with capture.lock:
+                seq = capture.sequence
+                jpeg, at, size = capture.jpeg, capture.captured_at, capture.sent_size
+                ocr = capture.ocr_result
+                ocr_at = capture.ocr_at
+            if since is not None:
+                try:
+                    if int(since) == seq:
+                        self._json(200, {"unchanged": True, "seq": seq})
+                        return
+                except ValueError:
+                    pass
+            if not jpeg:
+                self._json(503, {"error": "no frame yet"})
+                return
+            payload = {
+                "seq": seq,
+                "ts": round(at, 3),
+                "profile": profile,
+                "size": list(size),
+                "ocr": {
+                    "values": ocr.get("values") or {},
+                    "unstable": ocr.get("unstable") or [],
+                    "calibrated": calibrated,
+                    "ms": ocr.get("ms") or 0.0,
+                    "ageMs": round((time.perf_counter() - ocr_at) * 1000) if ocr_at else None,
+                },
+            }
+            if want_image:
+                payload["image"] = base64.b64encode(jpeg).decode("ascii")
+            if query.get("debug", ["0"])[0] in ("1", "true", "yes"):
+                payload["ocr"]["detail"] = ocr.get("detail") or {}
+            self._json(200, payload)
+
+    return Handler
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="PC 采集 + HUD OCR + /tick 服务")
+    parser.add_argument("--port", type=int, default=8770)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--fps", type=float, default=5.0)
+    parser.add_argument("--width", type=int, default=640, help="下发画面的宽度，0 表示原始尺寸")
+    parser.add_argument("--quality", type=int, default=70)
+    parser.add_argument("--monitor", type=int, default=1)
+    parser.add_argument("--window-title", default="", help="只截标题包含该关键字的窗口")
+    parser.add_argument("--source", choices=["screen", "image"], default="screen")
+    parser.add_argument("--image", default=str(ROOT / "vision" / "samples" / "synthetic-hud.png"))
+    parser.add_argument("--fields", default=str(Path(__file__).resolve().parent / "fields.yaml"))
+    parser.add_argument("--profile", default="",
+                        help="游戏档位名，读取 phone/profiles/<name>.yaml；省略则用 --fields")
+    parser.add_argument("--no-ocr", action="store_true", help="只发画面，不跑 OCR")
+    args = parser.parse_args()
+
+    fields_path = Path(args.fields)
+    if args.profile:
+        candidate = Path(__file__).resolve().parent / "profiles" / f"{args.profile.lower()}.yaml"
+        if candidate.exists():
+            fields_path = candidate
+        else:
+            print(f"[warn] 没有 {candidate}，回退到 {fields_path.name}")
+    config = load_config(fields_path)
+    config["_profile"] = args.profile.lower() if args.profile else ""
+    config["_ocr_enabled"] = not args.no_ocr
+    specs, derived = build_specs(config)
+
+    capture = Capture(args)
+    reader = None
+    threads = [threading.Thread(target=capture.loop, name="capture", daemon=True)]
+    if not args.no_ocr:
+        reader = HudReader(config, specs, derived)
+        threads.append(threading.Thread(target=capture.ocr_loop, args=(reader,),
+                                        name="ocr", daemon=True))
+    for thread in threads:
+        thread.start()
+    time.sleep(0.8)
+
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(capture, config))
+    base = f"http://{lan_ip()}:{args.port}"
+    print("PC 采集已启动")
+    print(f"  /tick   {base}/tick        <- 手机拉这个")
+    print(f"  /info   {base}/info")
+    print(f"  /apk    {base}/apk")
+    print(f"  画面 {args.width or '原生'} 宽, {args.fps:g} FPS, JPEG q{args.quality}, 源 {args.source}")
+    print(f"  档位 {str(config.get('profile') or args.profile or 'lol').lower()}"
+          f"  字段 {[spec.name for spec in specs]} 派生 {[spec.name for spec in derived]}"
+          f" calibrated={bool(config.get('calibrated'))}")
+    apk = newest_apk()
+    print(f"  APK {apk.name} ({apk.stat().st_size / 1024 / 1024:.1f} MB)" if apk
+          else "  APK 尚未生成（phone/dist 为空）")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n收到 Ctrl-C，正在停止…")
+    finally:
+        capture.stop()
+        server.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

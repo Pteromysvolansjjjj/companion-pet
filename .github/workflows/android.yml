@@ -1,0 +1,61 @@
+name: android
+
+# 本地不打包 APK，出包只走这里。
+# 手动触发一次即可；之后改 android/ 下的文件会自动重建。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: assembleDebug
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: 构建 debug APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: 收集产物
+        run: |
+          mkdir -p phone/dist
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK" || { echo "没有生成 APK"; ls -R android/app/build/outputs || true; exit 1; }
+          cp "$APK" "phone/dist/lolcompanion-pet-${GITHUB_RUN_NUMBER}.apk"
+          ls -lh phone/dist/
+
+      - name: 挂到 Release（Artifact 下载要登录，Release 不用）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: 陪玩桌宠 APK #${{ github.run_number }}
+          body: |
+            自动构建的 debug 版 APK，手机上直接下载安装。
+
+            - 包名 `com.lolcompanion.pet`
+            - 安装后先在设置里填电脑地址（例如 `192.168.1.10:8770`）和 DeepSeek Key
+            - 手机与电脑需在同一 Wi-Fi
+          files: phone/dist/*.apk
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

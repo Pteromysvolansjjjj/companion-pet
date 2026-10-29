@@ -1,0 +1,64 @@
+# phone/profiles/valorant.yaml — 瓦罗兰特 HUD 字段（占位 ROI，未校准）
+#
+# 与 phone/fields.yaml 的区别：这份是 FPS HUD，读血量/护甲/弹药/计时，不读团队击杀。
+# 用法：python phone/pc_capture.py --profile valorant
+#
+# 所有矩形都是「游戏画面」的归一化坐标（0..1，原点左上角）。
+# 这些数值是按 1920x1080 的常见 HUD 位置估的，**没有在真实画面上校准**。
+# 先跑 `python phone/calibrate.py --shot shots/valorant.png --profile valorant`，
+# 按 overlay 调整 rect，再把 calibrated 改成 true。
+
+version: 1
+profile: valorant
+name: 瓦罗兰特
+calibrated: false
+basis: { width: 1920, height: 1080 }
+
+ocr:
+  every_ms: 400      # FPS 血量变化快，采样比 LoL 密一点
+  stale_ms: 1200
+  min_score: 0.30
+  threads: 3
+
+fields:
+  hp:
+    rect: [0.0200, 0.9020, 0.0560, 0.0360]
+    kind: int
+    min: 0
+    max: 150
+    purpose: 当前生命值（瓦罗兰特显示纯数字，不含上限）
+  shield:
+    rect: [0.0820, 0.9020, 0.0480, 0.0360]
+    kind: int
+    min: 0
+    max: 100
+    purpose: 护甲值
+  ammo:
+    rect: [0.8930, 0.9020, 0.0800, 0.0400]
+    kind: pair
+    purpose: 弹药 current/maxreserve
+  credits:
+    rect: [0.0200, 0.8580, 0.0700, 0.0300]
+    kind: int
+    min: 0
+    max: 9000
+    purpose: 经济（购买阶段）
+  timer:
+    rect: [0.4550, 0.0180, 0.0900, 0.0400]
+    kind: clock
+    purpose: 回合倒计时
+  score:
+    derive: [allyKills, enemyKills]
+
+  allyKills:
+    rect: [0.3950, 0.0180, 0.0420, 0.0340]
+    kind: int
+    min: 0
+    max: 20
+    purpose: 我方回合分
+  enemyKills:
+    rect: [0.5650, 0.0180, 0.0420, 0.0340]
+    kind: int
+    min: 0
+    max: 20
+    purpose: 敌方回合分

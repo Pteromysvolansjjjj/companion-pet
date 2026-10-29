@@ -1,0 +1,81 @@
+# phone/fields.yaml — HUD 数字字段定义（PC 端 OCR 用）
+#
+# 所有矩形都是「游戏画面」的归一化坐标：0..1，原点左上角，宽高按比例。
+# 因此 1920x1080 / 2560x1440 / 窗口化 1600x900 都能用同一份配置。
+# 坐标系的原点是采集区域左上角（--window-title 时即该窗口客户区）。
+#
+# 现在这份是**占位默认值**：按 16:9 常见 HUD 位置估算，没有在真实游戏画面上校准。
+# calibrated: false 会随 /tick 一起下发，手机端据此降低对这些数字的信任权重。
+# 用真实截图跑 `python phone/calibrate.py --shot shot.png` 校准后，把 calibrated 改成 true。
+#
+# kind 取值：
+#   int    取第一个 1-4 位整数
+#   float  取第一个小数
+#   pair   "87/100" / "7:30" 形式的两段数字 -> [a, b]
+#   clock  "23:41" 或 "2341" -> 秒数
+#   text   原样返回识别文本
+# regex 可选；给了就用命名组 a/b（pair）、v（数值）、m+s（时钟）。
+# enabled: false 的字段只做记录，不参与 /tick 输出。
+
+version: 1
+calibrated: false
+basis: { width: 1920, height: 1080 }
+
+ocr:
+  every_ms: 500      # OCR 采样周期；画面 5 FPS 时约每 2-3 帧读一次
+  stale_ms: 1500     # 超过这个时长没有新读数 -> 该字段进 unstable
+  min_score: 0.30    # 单字符（如敌方击杀「8」）本身上限就只有 0.35-0.50，
+                     # 阈值给高会直接读不到；数字字段靠 min/max 兜住误读。
+                     # 需要更严可以在单个字段里写 min_score: 0.6
+  threads: 3
+
+fields:
+  # --- 顶部计分栏：左击杀 / 中间时钟 / 右击杀 --------------------------------
+  timer:
+    rect: [0.4274, 0.0000, 0.1452, 0.0480]
+    kind: clock
+    purpose: 游戏时钟 mm:ss
+  allyKills:
+    rect: [0.3350, 0.0048, 0.0660, 0.0384]
+    kind: int
+    min: 0
+    max: 300
+    purpose: 我方团队击杀
+  enemyKills:
+    rect: [0.5990, 0.0048, 0.0660, 0.0384]
+    kind: int
+    min: 0
+    max: 300
+    purpose: 敌方团队击杀
+  score:
+    derive: [allyKills, enemyKills]   # 派生字段，不单独 OCR
+
+  # --- 左下角英雄面板 --------------------------------------------------------
+  level:
+    rect: [0.3720, 0.9050, 0.0280, 0.0400]
+    kind: int
+    min: 1
+    max: 18
+    purpose: 英雄等级
+
+  # --- 以下默认关闭：默认 HUD 不显示数字，需要玩家在设置里打开数值显示或截图校准
+  gold:
+    enabled: false
+    rect: [0.3600, 0.9550, 0.0900, 0.0330]
+    kind: int
+    purpose: 金币（仅商店/记分板可见）
+  hp:
+    enabled: false
+    rect: [0.3330, 0.9280, 0.1200, 0.0300]
+    kind: pair
+    purpose: 生命值 current/max（默认 HUD 无数值，需自绘或改读色条）
+  mana:
+    enabled: false
+    rect: [0.3330, 0.9520, 0.1200, 0.0240]
+    kind: pair
+    purpose: 法力值 current/max
+  ammo:
+    enabled: false
+    rect: [0.7000, 0.9300, 0.0800, 0.0400]
+    kind: pair
+    purpose: 弹药（本作无此概念，保留给其它游戏复用）

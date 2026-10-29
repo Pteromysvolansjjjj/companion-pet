@@ -2,7 +2,7 @@
 const IDENTITY = ['accountId', 'summonerId', 'puuid', 'riotId', 'riotIdGameName', 'riotIdTagLine', 'displayName', 'gameName', 'tagLine', 'summonerName'];
 const ACCOUNT = [...IDENTITY, 'summonerLevel'];
 const KDA = ['kills', 'deaths', 'assists'];
-const PLAYER = [...IDENTITY, 'championName', 'rawChampionName', 'championId', 'championLevel', 'level', 'team', 'teamId', 'position', 'assignedPosition', 'selectedPosition', 'isDead', ...KDA];
+const PLAYER = [...IDENTITY, 'championName', 'rawChampionName', 'championId', 'championLevel', 'level', 'team', 'teamId', 'position', 'assignedPosition', 'selectedPosition', 'isDead', 'minionsKilled', ...KDA];
 const SELECTION_PLAYER = [...PLAYER, 'cellId', 'championPickIntent'];
 const QUEUE = ['id', 'queueId', 'name', 'type', 'category', 'description', 'gameMode', 'mapId'];
 
@@ -85,8 +85,12 @@ const BASIC_SECTIONS = {
   live: value => select(value, [], {
     events: eventMetadata,
     gameData: value => select(value, ['gameMode', 'mapNumber', 'mapName', 'gameType', 'isReplay']),
-    activePlayer: value => select(value, [...IDENTITY, 'level']), allPlayers: each(player),
+    activePlayer: value => select(value, [...IDENTITY, 'level', 'healthRatio', 'manaRatio', 'teamKills', 'enemyTeamKills', 'source']),
+    allPlayers: each(player),
   }),
+  // Screen-OCR readings keep their own section so a text estimate is never
+  // presented as an interface fact.
+  screen: value => select(value, ['source', 'window', 'fields', 'bars', 'board', 'lines', 'degraded', 'note']),
   endgame: value => select(value, ['gameId', 'gameMode', 'gameType', 'queueType', 'queueId', 'gameLength', 'isRanked', 'ranked', 'win', 'winner'], {
     teams: each(resultTeam), players: each(resultPlayer), participants: each(resultPlayer),
   }),

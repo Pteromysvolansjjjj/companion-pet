@@ -1,0 +1,4 @@
+dropped spike
+enemy
+planted spike
+teammate

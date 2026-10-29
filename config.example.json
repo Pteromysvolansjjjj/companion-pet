@@ -1,12 +1,24 @@
 {
-  "installRoots": ["E:\\WeGameApps\\英雄联盟", "D:\\WeGameApps\\英雄联盟"],
-  "logDirectories": [],
-  "discoverProcess": true,
+  "dataSource": "screen",
   "dataMode": "basic",
   "pollIntervalMs": 1000,
   "decisionIntervalMs": 15000,
   "bubbleHoldMs": 5000,
   "replyLength": 20,
+  "voiceMode": "push",
+  "voiceEcho": "bubble",
+  "voiceHotkey": "F2",
+  "voiceModel": "small",
+  "voiceLanguage": "zh",
+  "visionIntervalMs": 1000,
+  "screenStaleMs": 4000,
+  "desktop": true,
+  "installRoots": [
+    "E:\\WeGameApps\\英雄联盟（含经典模式）"
+  ],
+  "logDirectories": [],
+  "discoverProcess": true,
   "requestTimeoutMs": 2500,
-  "desktop": true
+  "mobile": true,
+  "mobilePort": 8790
 }

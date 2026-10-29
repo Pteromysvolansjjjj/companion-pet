@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">陪玩桌宠</string>
+    <string name="channel_name">陪玩连接</string>
+    <string name="channel_desc">保持与电脑的画面连接</string>
+    <string name="notification_title">陪玩桌宠运行中</string>
+    <string name="notification_stop">停止</string>
+    <string name="settings">设置</string>
+    <string name="start">开始</string>
+    <string name="stop">停止</string>
+    <string name="waiting">等待连接</string>
+    <string name="host_hint">电脑地址，例如 192.168.1.10:8770</string>
+</resources>

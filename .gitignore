@@ -1,0 +1,37 @@
+# Local runtime state — never publish
+/config.json
+/data/
+/.updates/
+/logs/
+
+# Python sidecar environment and model weights (recreated by vision/setup.ps1)
+/vision/.venv/
+/vision/models/
+# 训练/导出用的独立环境（与采集环境隔离，约 1GB，不入库）
+/phone/train/.venv/
+__pycache__/
+*.pyc
+
+# Generated test artefacts
+/vision/samples/
+/desktop/test-output/
+
+# Node
+node_modules/
+
+# Android build output（APK 由 GitHub Actions 出，本地不打包）
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/.idea/
+*.iml
+
+# 手机端产物：APK 与模型都不入库
+/phone/dist/*.apk
+/phone/dist/*.apk.tmp
+/phone/models/*.onnx
+/phone/models/*.tflite
+/phone/models/*.pt
+/phone/models/*_saved_model/
+/phone/calibration/

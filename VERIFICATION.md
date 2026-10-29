@@ -63,3 +63,58 @@ node .\tests\host\renderer-protocol.mjs
 ```
 
 前端测试默认读取 `E:/deepseek/dsh/resources/app.asar`，可通过 `DSH_ASAR` 指定另一安装包。测试不修改用户 profile、聊天记录或游戏数据。
+
+## 本 fork（0.7.1-screen.1）：屏幕 OCR 与语音输入
+
+本节只记录**已真正执行过**的检查，以及明确未覆盖的部分。测试环境：Windows、Python 3.13.14、12 核 CPU、Intel Arc B580；本机**未安装 DSH**，因此没有做宿主内实机验收。
+
+| 环节 | 怎么验的 | 结果 |
+| --- | --- | --- |
+| Python 依赖（RapidOCR / onnxruntime / faster-whisper / sounddevice） | 在 `vision/.venv` 内实际安装并导入 | ✅ 全部可用（faster-whisper 1.2.1 / ctranslate2 4.8.4 / onnxruntime 1.31.1） |
+| 单行识别速度 | 1080p 切片，识别器直调 | ✅ 4–25 ms/槽；检测模式约 0.5–1.0 s/次 |
+| 合成画面字段提取 | `vision/selftest.py`：按布局绘制 1080p 假 HUD，跑真实侧车 | ✅ 时间 23:41、比分 15/8、等级 11 全部命中 |
+| 击杀事件去重 | 同上，两帧序列（第二帧新增一条播报） | ✅ 第一帧为基线不播报，第二帧只发新增的那条 |
+| 记分板解析 | 合成 10 行表格，检测模式识别 | ✅ 10 行全部解析出 KDA 与补刀 |
+| 中文语音识别 | SAPI 合成 3 句 → faster-whisper small int8 | ✅ 三句全部正确（标点省略） |
+| 语音链路（无麦克风） | `vision/voice_pipe_test.py`：音频注入 → 裁剪 → 队列 → 转写 → 事件 | ✅ 输出「打野小心一点 对面中单不见了」，首句 4.7 s（含模型加载），后续约 1.8 s |
+| 热键注册与切换 | Node 侧车协议实跑，F2 → Ctrl+Alt+F2 切换 | ✅ 注册成功；修复了替换实例时的重复注册竞态 |
+| OCR 结果 → 原有通路 | `tests/vision/host-screen.test.mjs`：假侧车 → 真 watcher → 真 batcher → 假 agent | ✅ 投递一条 `[LOL 实时数据]`，含 `screen_ocr`、时间、等级 |
+| 语音 → 用户消息 | 同上，注入 `voice` 事件 | ✅ 生成 `source.kind = "user"` 消息，并在气泡回显 |
+| 数据源切换 | `lol_tune` 切 screen/api、voiceMode off | ✅ OCR 开关、语音重启、停止均按预期调用 |
+| 回归 | `npm test`（122 项） | ✅ 116 通过，6 项失败与改动前完全一致（依赖本机 DSH `app.asar`，本机未安装） |
+
+**未覆盖**：真实对局画面下的区域坐标与识别准确率（需实机截图校准 `vision/layout.json`）、真实麦克风按键录音、独占全屏下的取画面、DSH 宿主内的端到端联动。这四项都需要在装有 DSH 与英雄联盟的机器上按 `docs/SCREEN_OCR.md` 第 6 节校准后验收。
+
+## 手机端（`phone/`）：`/tick` 协议与 APK 工程
+
+本节记录 2026-10-28 夜实际执行过的检查。测试环境同上；**本机没有 JDK 17、Android SDK 也未解压**，
+所以 Android 工程只做了静态校验，**没有编译、没有生成 APK**（按用户要求，本地不打包）。
+
+| 环节 | 怎么验的 | 结果 |
+| --- | --- | --- |
+| 字段提取（PC 侧） | `phone/selftest.py` 起真实服务 + 合成 HUD 图 | ✅ 时钟 1421(23:41) / 15 / 8 / 11 / score[15,8] 全部命中 |
+| OCR 预处理 | 对比原图与紧致裁剪+放大到 56px | ✅ 单字符「8」由误读 `¥８`(0.39) 变为 `8`(0.35)；`23:41` 置信 0.64→0.83 |
+| OCR 耗时 | 4 个字段一轮 | ✅ 13–18 ms（预热后，3 线程） |
+| `since` 语义 | `curl /tick?since=<当前 seq>` | ✅ 返回 `{"unchanged": true, "seq": n}`，约 20 字节 |
+| `?image=0` | 同上 | ✅ 不返回 base64 图，手机无模型时省流量 |
+| 字段读不到 | 同一 reader 依次喂 HUD 图 / 全黑图 / HUD 图 | ✅ 黑屏时保留旧值并全部进 `unstable`，恢复后清空 |
+| 配置缺失 | `--fields phone/nope.yaml` | ✅ 回退内置默认值，四个字段照常读出 |
+| `--no-ocr` | 起服务后请求 `/tick` | ✅ `values` 为空、不报错 |
+| `/apk` | 放一个假 APK / 移除后再请求 | ✅ 有包回 200 带 `content-disposition`；无包回 404 JSON 而不是崩 |
+| 桌面验证版 | `phone/desktop_runner.py --selftest` | ✅ 7 项（NMS 去重、分区聚合、事件生成、兜底文案、回复清洗） |
+| 端到端（无 Key/无模型） | `desktop_runner.py --host 127.0.0.1:8771 --once` | ✅ 打印 `timer=1421 allyKills=15 …` 与兜底气泡「23:41，先补刀，别越线。」 |
+| 校准工具 | `phone/calibrate.py --shot synthetic-hud.png` | ✅ 生成 overlay 与每字段裁剪图，4/4 可读 |
+| Android 源码 | XML 解析、资源引用比对、括号配对 | ✅ 5 个 XML 合法，`R.*` 引用无缺失，无括号失衡 |
+| 工作流 | `yaml.safe_load` | ✅ 6 个 step，`assembleDebug` → Release |
+
+**未覆盖**：Kotlin 编译与真机运行（无 JDK/SDK、无设备）、YOLO 真实推理（`phone/models/yolov8n.onnx` 不存在，
+只验证了后处理与 NMS）、DeepSeek 真实调用（本机无 Key）、真实游戏画面下的 ROI 校准（`fields.yaml`
+仍是占位值、`calibrated: false`）、GitHub Actions 实际出包。
+
+```text
+npm run phone:selftest                        # 18/18
+npm run phone:capture                         # 起服务，手机拉 /tick
+npm run phone:calibrate -- --shot shots/hud.png
+npm run phone:runner -- --host 192.168.1.10:8770
+```
+
