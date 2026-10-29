@@ -67,6 +67,21 @@ LoL 没有可用公开权重，且 640 宽下发时英雄只有 10–15px，建�
 
 训练环境是独立的 `phone/train/.venv`（约 1GB，已 gitignore），不污染采集用的 `vision/.venv`。
 
+### 仓库与出包（2026-10-29 中午，已完成）
+
+- 仓库：https://github.com/Pteromysvolansjjjj/companion-pet （public，`main`）
+- 首次推送失败过一次，原因是**本地是浅克隆**（`.git/shallow` 边界在 `c26c300`），
+  push 时需要发送的增量基对象在边界外，报 `did not receive expected object`。
+  修复：`git fetch --unshallow upstream`。以后重新 clone 时若用 `--depth`，还会遇到同样问题。
+- 第二次构建成功：run #2 全绿，Release `apk-2` 里的 `lolcompanion-pet-2.apk`（33.07 MB，
+  四个 ABI 全打进去了），已下载到 `phone/dist/`，`/apk` 端点可直接下。
+- 编译期修掉一个真实错误：`buildNotification` 调用传了 2 个参数、签名只有 1 个
+  （`CompanionService.kt:165`），补上 `source` 参数并让通知栏在兜底时显示「（本地兜底）」。
+
+> 想减小 APK：在 `android/app/build.gradle` 的 `defaultConfig` 里加
+> `ndk { abiFilters 'arm64-v8a' }`，可砍掉另外三个 ABI（约省 15MB）。
+> 8 Gen 3 只需 arm64。
+
 明天要做的三件事（都需要人工）：
 
 1. 推仓库 → 跑 Actions → 从 Release 下 APK（工作流已就绪，不需要本地 JDK）

@@ -161,8 +161,9 @@ def main() -> int:
         checks["/info 有 OCR 耗时"] = (info.get("ocr", {}).get("ms") or 0) > 0
 
         try:
-            status, body = get(f"{base}/apk")
-            checks["/apk 有包就下"] = status == 200 and len(body) > 0
+            # 用 /apk/info 而不是 /apk：后者会把 33MB 的包整个下载一遍
+            apk = get_json(f"{base}/apk/info")
+            checks["/apk 有包可下"] = apk.get("bytes", 0) > 1024
         except urllib.error.HTTPError as error:
             checks["/apk 没包回 404"] = error.code == 404
     finally:

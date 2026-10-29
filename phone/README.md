@@ -110,10 +110,11 @@ GET /tick?since=<seq>
 
 ### 拿 APK
 
-本地不打包。到仓库的 **Releases** 里下载最新 `lolcompanion-pet-*.apk`
-（`.github/workflows/android.yml` 在 GitHub Actions 上构建，产物挂在 Release，不用登录就能下）。
+本地不打包，走 GitHub Actions：
 
-或者服务起了、`phone/dist` 里有 APK 时，手机浏览器直接开 `http://<PC_IP>:8770/apk`。
+- 仓库：https://github.com/Pteromysvolansjjjj/companion-pet
+- **Releases** 页下载最新 `lolcompanion-pet-*.apk`（公开仓库，不用登录）
+- 或者服务起了、`phone/dist` 里有 APK 时，手机浏览器直接开 `http://<PC_IP>:8770/apk`
 
 ### 安装后三步
 
