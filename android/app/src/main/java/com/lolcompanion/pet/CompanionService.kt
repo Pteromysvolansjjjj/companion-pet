@@ -305,7 +305,7 @@ class CompanionService : Service() {
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(text: String): Notification {
+    private fun buildNotification(text: String, source: String = ""): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -318,7 +318,7 @@ class CompanionService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_pet)
             .setContentTitle(getString(R.string.notification_title))
-            .setContentText(text)
+            .setContentText(if (source == "fallback") "$text（本地兜底）" else text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
