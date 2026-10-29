@@ -25,12 +25,32 @@ object DeepSeek {
         .retryOnConnectionFailure(false)
         .build()
 
+    /**
+     * 陪玩人设。
+     *
+     * 之前这版开头是「只根据给你的 hud 数字说话」——那句话等于把模型钉成复读机：
+     * 只准引用数字，它当然只会念数字。现在改成：数值可以提，但**别重复**，
+     * 并且给了四个口语示例（few-shot 对口语风格的拉拽比任何形容词都管用）。
+     */
     private const val SYSTEM_PROMPT =
-        "你是坐在玩家旁边看比赛的陪玩。语气像熟人，短句，口语，别端着。" +
-            "只根据给你的 hud 数字和 scene 检测结果说话，不要编造没给你的信息。" +
-            "每次回 1-2 句，总长不超过 45 个汉字，不要 Markdown，不要表情符号。" +
-            "玩家没问你就别讲道理，只点评眼前发生的事。" +
-            "玩家开口问你时，先回答他，再补一句自己的判断。"
+        "你是在玩家旁边一起打游戏的陪玩，像一个熟人坐在旁边讲话。\n" +
+            "说话方式：\n" +
+            "- 口语、短句，像朋友聊天，别像播报员或者客服。\n" +
+            "- 提醒玩家数值是可以的，比如血量不高、子弹快没了、刚拿下一个。\n" +
+            "- 但别把同一个数值反复念。玩家早就知道自己的血量是多少，你再报一遍就没意思了。\n" +
+            "- 你刚说过的话不要重复。同样的意思换个说法，或者干脆闭嘴。\n" +
+            "- 最多 2 句，总共不超过 40 个汉字。不要 Markdown，不要表情符号。\n" +
+            "- 不要编造没给的信息。没素材的时候可以只说一句闲话。\n" +
+            "玩家被打死的时候：先接住情绪——安慰一句或者给个具体建议，\n" +
+            "别只说「你死了」。\n" +
+            "下面是好的说法：\n" +
+            "「对面那个狙有点东西，别急着拉枪线」\n" +
+            "「你血量不多了，先退一下」\n" +
+            "「这波我帮你盯着，你放心打」\n" +
+            "「刚才那波是他先开的枪，下次等技能转好再 peek」\n" +
+            "下面是坏的说法（别这样）：\n" +
+            "「当前生命值 23，护甲 0，弹药 3」\n" +
+            "「根据检测结果，画面中存在 2 个敌方目标」"
 
     /**
      * @param playerText 玩家刚说的话；非空时当作对话来答，而不是自动播报。
@@ -57,8 +77,11 @@ object DeepSeek {
                 val body = JSONObject()
                     .put("model", currentModel)
                     .put("stream", false)
-                    .put("temperature", 0.9)
-                    .put("max_tokens", 120)
+                    .put("temperature", 1.0)
+                    .put("max_tokens", 100)
+                    // 压一下复读：同一场对话里反复说同一句会很劝退
+                    .put("presence_penalty", 0.6)
+                    .put("frequency_penalty", 0.4)
                     .put(
                         "messages", JSONArray()
                             .put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
@@ -129,46 +152,51 @@ object DeepSeek {
             .filter { it.isNotEmpty() }
             .take(limit)
 
-    /** 没 key / 没网 / 模型挂了，也要说一句真话。 */
+    /**
+     * 没 key / 没网 / 模型挂了，也要说一句真话。
+     *
+     * 兼容两种 payload：自动播报用的是「情境句」版（notes），
+     * 玩家插话用的是带 hud 数值的那版。
+     */
     fun fallback(payload: JSONObject): String {
-        val hud = payload.optJSONObject("hud")
-        val values = hud?.optJSONObject("values") ?: JSONObject()
+        val notes = payload.optJSONArray("notes")
         val events = payload.optJSONArray("events") ?: JSONArray()
-        val objects = payload.optJSONObject("scene")?.optJSONArray("objects")
-        val top = if (objects != null && objects.length() > 0) objects.optJSONObject(0) else null
-        val timer = if (values.has("timer")) values.optInt("timer", -1) else -1
-        val clock = if (timer >= 0) "%d:%02d".format(timer / 60, timer % 60) else null
 
         // 玩家开口问了，先应一声，别拿数据糊弄
         if (payload.optBoolean("fromPlayer", false)) {
-            val hint = when {
-                top != null && top.optInt("count") >= 3 -> "那边人不少"
-                clock != null -> "$clock 这会儿"
-                else -> "画面挺安静"
-            }
-            return "我在，$hint。"
+            val values = payload.optJSONObject("hud")?.optJSONObject("values") ?: JSONObject()
+            val timer = if (values.has("timer")) values.optInt("timer", -1) else -1
+            val clock = if (timer >= 0) "%d:%02d".format(timer / 60, timer % 60) else null
+            return if (clock != null) "我在，$clock 这会儿你问我了，说吧。" else "我在，你说。"
         }
 
         for (index in 0 until events.length()) {
             val event = events.optJSONObject(index) ?: continue
             when (event.optString("kind")) {
-                "death" -> return "这波没了，别急，等人齐再打。"
-                "allyKills", "enemyKills" -> {
-                    val up = event.optString("kind") == "allyKills" &&
-                        event.optInt("to") > event.optInt("from")
-                    return if (up) "拿下一个，节奏来了。" else "对面又拿一个，稳一点。"
-                }
+                "death" -> return "这波没了，别急，想好再出去。"
+                "hurt" -> return "你挨了一下，先拉开距离。"
+                "allyKillsChange" -> return "拿下一个，节奏来了。"
+                "enemyKillsChange" -> return "对面又拿一个，稳一点。"
             }
         }
-        if (top != null && top.optInt("count") >= 3) {
-            val region = when (top.optString("region")) {
-                "left" -> "左边"
-                "right" -> "右边"
-                else -> "中路"
+
+        if (notes != null && notes.length() > 0) {
+            val first = notes.optString(0)
+            return when {
+                first.contains("打死") -> "这波没了，别急，想好再出去。"
+                first.contains("挨了") -> "你挨了一下，先拉开距离。"
+                first.contains("血") -> "你血量不多了，先退一下。"
+                first.contains("子弹") || first.contains("备弹") -> "子弹不多了，看看怎么补。"
+                first.contains("经济") -> "经济不多了，这波别乱买。"
+                first.contains("护甲") -> "护甲没了，小心点。"
+                first.contains("对面") -> "那边有人，注意点。"
+                else -> "我盯着呢，你打你的。"
             }
-            return "$region 那边人不少，注意点。"
         }
-        if (clock != null) return "$clock，先补刀，别越线。"
+
+        val values = payload.optJSONObject("hud")?.optJSONObject("values") ?: JSONObject()
+        val timer = if (values.has("timer")) values.optInt("timer", -1) else -1
+        if (timer >= 0) return "%d:%02d，稳住别急。".format(timer / 60, timer % 60)
         return "画面有点安静，稳住补刀。"
     }
 }

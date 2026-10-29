@@ -40,6 +40,13 @@ class CompanionService : Service() {
     private var lastEvents = emptyList<JSONObject>()
     private var lastCalibrated = false
 
+    /** 最近一次看到敌人的时刻与数量：玩家随后死亡时用来判断是不是被打了。 */
+    private var lastEnemyAt = 0L
+    private var lastEnemyCount = 0
+
+    /** 最近说过的话，防复读。 */
+    private val recentSpoken = mutableListOf<String>()
+
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
@@ -142,7 +149,6 @@ class CompanionService : Service() {
 
                 val values = tick.values
                 val unstable = tick.unstable
-                val events = trackEvents(values, unstable)
 
                 val objects = mutableListOf<Triple<String, Int, String>>()
                 val activeDetector = detector
@@ -158,6 +164,9 @@ class CompanionService : Service() {
                     }
                 }
 
+                // 事件要在检测之后才算：死亡时要结合「刚刚看到几个敌人」
+                val events = trackEvents(values, unstable, objects)
+
                 lastValues = values
                 lastUnstable = unstable
                 lastObjects = objects
@@ -165,7 +174,14 @@ class CompanionService : Service() {
                 lastCalibrated = tick.calibrated
 
                 val emptyHud = values.length() == 0
-                val due = events.isNotEmpty() ||
+                // clock 事件只当上下文，不触发播报——每 2.4 秒来一次的话必然复读。
+                // 只有「死了 / 挨打 / 拿了人头」这种才值得立刻说一句。
+                val notable = events.any {
+                    val kind = it.optString("kind")
+                    kind == "death" || kind == "hurt" ||
+                        kind == "allyKillsChange" || kind == "enemyKillsChange"
+                }
+                val due = notable ||
                     System.currentTimeMillis() - lastSpokeAt >= prefs.intervalSec * 1000L
                 if (emptyHud && objects.isEmpty()) {
                     PetBus.status("已连接，画面里还没有可读数字")
@@ -178,11 +194,13 @@ class CompanionService : Service() {
                 PetBus.stats(buildStats(profile, values, objects))
 
                 if (due) {
-                    val payload = buildPayload(profile, values, unstable, tick.calibrated, objects, events)
+                    val payload = broadcastPayload(profile, values, objects, events)
                     val (text, source) = DeepSeek.ask(payload, prefs.apiKey, prefs.deepseekModel)
                     val lines = DeepSeek.splitLines(text)
-                    if (lines.isNotEmpty()) {
+                    // 复读保护：跟最近几句太像就不发，宁可不说也别像机器人
+                    if (lines.isNotEmpty() && !isRepeat(text)) {
                         PetBus.say(lines, holdMillisFor(text))
+                        rememberSpoken(text)
                         lastSpokeAt = System.currentTimeMillis()
                         updateNotification(buildNotification(lines.first(), source))
                     }
@@ -224,6 +242,36 @@ class CompanionService : Service() {
         }
     }
 
+    // ------------------------------------------------------------ 复读保护
+    /**
+     * 跟最近几句太像就算复读。
+     *
+     * 之前「每 2.4 秒一个 clock 事件就播报一次」是复读的主因，
+     * 现在 clock 不再触发播报，这里再加一道兜底：宁可不说，也别像机器人。
+     */
+    private fun isRepeat(text: String): Boolean {
+        val current = bigrams(text)
+        if (current.isEmpty()) return false
+        return recentSpoken.any { previous ->
+            val other = bigrams(previous)
+            other.isNotEmpty() &&
+                current.count { it in other }.toDouble() /
+                maxOf(current.size, other.size) > 0.55
+        }
+    }
+
+    private fun rememberSpoken(text: String) {
+        recentSpoken.add(text)
+        while (recentSpoken.size > 4) recentSpoken.removeAt(0)
+    }
+
+    private fun bigrams(text: String): Set<String> {
+        val clean = text.filter { !it.isWhitespace() }
+        if (clean.isEmpty()) return emptySet()
+        if (clean.length < 2) return setOf(clean)
+        return (0 until clean.length - 1).map { clean.substring(it, it + 2) }.toSet()
+    }
+
     // ------------------------------------------------------------ 玩家插话
     /**
      * 玩家说了一句话（PC 麦克风识别后送来的），立刻回一句。
@@ -245,8 +293,26 @@ class CompanionService : Service() {
     }
 
     // ---------------------------------------------------------------- events
-    private fun trackEvents(values: JSONObject, unstable: List<String>): List<JSONObject> {
+    /**
+     * 把这一帧的变化转成事件。
+     *
+     * 血量格式有两种：LoL 是数组 `hp: [当前, 上限]`，瓦罗兰特是纯数字 `hp: 100`。
+     * 之前只认数组，所以**瓦罗兰特死了永远不会触发 death**——这是真 bug。
+     */
+    private fun trackEvents(
+        values: JSONObject,
+        unstable: List<String>,
+        objects: List<Triple<String, Int, String>>
+    ): List<JSONObject> {
         val events = mutableListOf<JSONObject>()
+
+        // 看到敌人就记一笔：等会儿玩家死了，才知道说得出「刚才那波是被打了」
+        val enemies = objects.filter { it.first.equals("enemy", ignoreCase = true) }
+        if (enemies.isNotEmpty()) {
+            lastEnemyAt = System.currentTimeMillis()
+            lastEnemyCount = enemies.sumOf { it.second }
+        }
+
         if (values.has("timer")) {
             val timer = values.optInt("timer", -1)
             val old = previous["timer"] as? Int
@@ -265,13 +331,37 @@ class CompanionService : Service() {
                 )
             }
         }
+
         if (values.has("hp")) {
-            val health = values.optJSONArray("hp")
-            val old = previous["hp"] as? JSONArray
-            if (health != null && health.length() >= 1 && old != null && old.length() >= 1) {
-                if (health.optInt(0) == 0 && old.optInt(0) > 0) {
-                    events.add(JSONObject().put("kind", "death"))
+            val arrayNow = values.optJSONArray("hp")
+            val arrayBefore = previous["hp"] as? JSONArray
+            val now: Int
+            val before: Int
+            if (arrayNow != null && arrayNow.length() >= 1) {
+                now = arrayNow.optInt(0)
+                before = arrayBefore?.optInt(0) ?: -1
+            } else {
+                now = values.optInt("hp", -1)
+                before = previous["hp"] as? Int ?: -1
+            }
+            if (now == 0 && before > 0) {
+                val gap = if (lastEnemyAt > 0) {
+                    Math.round((System.currentTimeMillis() - lastEnemyAt) / 1000.0)
+                } else {
+                    -1
                 }
+                events.add(
+                    JSONObject().put("kind", "death")
+                        .put("hpBefore", before)
+                        .put("enemyCount", lastEnemyCount)
+                        .put("secondsSinceEnemy", gap)
+                )
+            } else if (now > 0 && before > 0 && before - now >= 15) {
+                // 掉了不少血但没死：值得提醒一句「你被打了」
+                events.add(
+                    JSONObject().put("kind", "hurt")
+                        .put("from", before).put("to", now)
+                )
             }
         }
 
@@ -313,7 +403,100 @@ class CompanionService : Service() {
                     .put("calibrated", calibrated)
             )
             .put("events", eventArray)
-            .put("ask", "看一眼现在该干嘛，一句话。")
+            .put("ask", "此刻你想对他说什么？")
+    }
+
+    /**
+     * 自动播报用的精简 payload。
+     *
+     * 关键改动：**不把 hud 数值表发过去**，只发「情境句」。
+     * 模型看到 `{"hp": 23, "ammo": 3}` 就会去复述；看到「你只剩 23 血，快没了」
+     * 才会去说人话。这一条比任何提示词都管用，顺带还省 token。
+     */
+    private fun broadcastPayload(
+        profile: String,
+        values: JSONObject,
+        objects: List<Triple<String, Int, String>>,
+        events: List<JSONObject>
+    ): JSONObject {
+        val notes = JSONArray()
+        notableNotes(values).forEach { notes.put(it) }
+        for ((label, count, region) in objects) {
+            notes.put(sceneSentence(label, count, region))
+        }
+        val eventArray = JSONArray()
+        events.forEach { eventArray.put(it) }
+
+        // 死亡/挨打翻译成人话，顺便把「刚刚看到几个敌人」带上去，
+        // 模型才能说出「刚才那波是被他抓的」而不是干巴巴一句「你死了」。
+        var died = false
+        for (event in events) {
+            when (event.optString("kind")) {
+                "death" -> {
+                    died = true
+                    val hpBefore = event.optInt("hpBefore", 0)
+                    val gap = event.optInt("secondsSinceEnemy", -1)
+                    val enemies = event.optInt("enemyCount", 0)
+                    val text = when {
+                        enemies > 0 && gap in 0..8 ->
+                            "你刚被对面的人打死了（${gap}秒前画面里还有 $enemies 个）"
+                        enemies > 0 -> "你被对面的人打死了"
+                        else -> "你死了"
+                    }
+                    notes.put("$text，刚才血量还有 $hpBefore")
+                }
+                "hurt" -> notes.put(
+                    "你挨了一下，血量从 ${event.optInt("from")} 掉到 ${event.optInt("to")}"
+                )
+            }
+        }
+
+        // 把最近说过的话也带上，模型自己就知道别再重复
+        val recent = JSONArray()
+        recentSpoken.forEach { recent.put(it) }
+
+        return JSONObject()
+            .put("game", profile)
+            .put("notes", notes)
+            .put("events", eventArray)
+            .put("recent", recent)
+            .put(
+                "ask", if (died) "他刚被打死了，说句话安慰一下或者给个具体建议"
+                else "此刻你想对他说什么？"
+            )
+    }
+
+    /** 把数值翻译成「值得说的事」。 */
+    private fun notableNotes(values: JSONObject): List<String> {
+        val notes = mutableListOf<String>()
+        val hp = values.optInt("hp", -1)
+        if (hp in 1..35) notes.add("你只剩 $hp 血，快没了")
+        else if (hp in 36..70) notes.add("血量不太健康")
+        val shield = values.optInt("shield", -1)
+        if (shield == 0 && hp > 0) notes.add("护甲已经掉光了")
+        val ammo = values.optInt("ammo", -1)
+        if (ammo in 0..3) notes.add("子弹只剩 $ammo 发")
+        val reserve = values.optInt("ammoReserve", -1)
+        if (reserve == 0 && ammo in 0..12) notes.add("备弹也空了")
+        val credits = values.optInt("credits", -1)
+        if (credits in 0..800) notes.add("经济只剩 $credits，可能买不起东西")
+        return notes
+    }
+
+    /** 检测结果说成人话。 */
+    private fun sceneSentence(label: String, count: Int, region: String): String {
+        val who = when (label.trim().lowercase()) {
+            "enemy" -> "对面"
+            "teammate" -> "队友"
+            "dropped spike", "planted spike" -> "包"
+            else -> label
+        }
+        val where = when (region) {
+            "left" -> "左边"
+            "right" -> "右边"
+            else -> "中路"
+        }
+        return "$where有 $count 个$who"
     }
 
     private fun buildStats(
