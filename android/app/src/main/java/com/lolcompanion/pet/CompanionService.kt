@@ -44,6 +44,12 @@ class CompanionService : Service() {
     private var lastEnemyAt = 0L
     private var lastEnemyCount = 0
 
+    /** 观战名字连续出现几帧才确认死亡（躲开 OCR 单帧误读）。 */
+    private var spectateFrames = 0
+
+    /** 这一次死亡已经报过了，复活前不重复触发。 */
+    private var wasSpectating = false
+
     /** 上一帧的敌人数量，用来判断「新出现」。 */
     private var previousEnemyCount = 0
 
@@ -358,6 +364,14 @@ class CompanionService : Service() {
         return sb.toString()
     }
 
+    /** 距离上一次在画面里看到敌人过去了多少秒；没看到过返回 -1。 */
+    private fun secondsSinceEnemy(): Int =
+        if (lastEnemyAt > 0) {
+            Math.round((System.currentTimeMillis() - lastEnemyAt) / 1000.0).toInt()
+        } else {
+            -1
+        }
+
     // ------------------------------------------------------------ 记忆
     /** 往对局记忆里加一条。 */
     private fun remember(text: String) {
@@ -489,6 +503,35 @@ class CompanionService : Service() {
             }
         }
 
+        // 死亡判定：看观战视角的队友名字，不看血量。
+        //
+        // 自己阵亡后左下角会浮出「头像 + 名字 + 切换玩家」，这是本人视角下完全没有
+        // 的 UI（实测同一矩形：观战帧读到 'YU的狗' 置信度 0.71，本人帧读不到）。
+        // 而血量在观战时会整块消失、读到的是「读不到」而不是 0，
+        // 所以 hp==0 这条判据在实战里基本不触发，已经去掉。
+        val spectateName = if (values.has("spectate")) {
+            values.optString("spectate", "").trim()
+        } else {
+            ""
+        }
+        val spectating = spectateName.isNotEmpty() && !unstable.contains("spectate")
+        spectateFrames = if (spectating) spectateFrames + 1 else 0
+
+        var diedNow = false
+        if (spectateFrames >= SPECTATE_CONFIRM_FRAMES && !wasSpectating) {
+            events.add(
+                JSONObject().put("kind", "death")
+                    .put("spectating", true)
+                    .put("watched", spectateName)
+                    .put("enemyCount", lastEnemyCount)
+                    .put("secondsSinceEnemy", secondsSinceEnemy())
+            )
+            wasSpectating = true
+            diedNow = true
+        }
+        // 复活：血量重新读得到，且观战名字也没了
+        if (values.has("hp") && !spectating) wasSpectating = false
+
         if (values.has("hp")) {
             hpMissingSince = 0L
             val arrayNow = values.optJSONArray("hp")
@@ -502,19 +545,7 @@ class CompanionService : Service() {
                 now = values.optInt("hp", -1)
                 before = previous["hp"] as? Int ?: -1
             }
-            if (now == 0 && before > 0) {
-                val gap = if (lastEnemyAt > 0) {
-                    Math.round((System.currentTimeMillis() - lastEnemyAt) / 1000.0)
-                } else {
-                    -1
-                }
-                events.add(
-                    JSONObject().put("kind", "death")
-                        .put("hpBefore", before)
-                        .put("enemyCount", lastEnemyCount)
-                        .put("secondsSinceEnemy", gap)
-                )
-            } else if (now > 0 && before > 0 && before - now >= 15) {
+            if (now > 0 && before > 0 && before - now >= 15) {
                 // 掉了不少血但没死：值得提醒一句「你被打了」
                 events.add(
                     JSONObject().put("kind", "hurt")
@@ -522,24 +553,18 @@ class CompanionService : Service() {
                 )
             }
         } else if (previous.containsKey("hp")) {
-            // 血量 HUD 整块不见了：瓦罗兰特死亡后切到观战视角，自己的血条会直接消失，
-            // 读到的不是 0 而是「读不到」。持续 1.2 秒以上才判死，避免 OCR 偶发漏读。
+            // 兜底：血量 HUD 整块消失超过 1.2 秒，且观战名字也没读到
+            // （比如 UI 缩放导致 spectate 的框没对准）。1.2 秒是为了躲开 OCR 漏读。
             val now = System.currentTimeMillis()
             if (hpMissingSince == 0L) hpMissingSince = now
-            if (now - hpMissingSince > 1200) {
-                val before = (previous["hp"] as? Int) ?: (previous["hp"] as? JSONArray)?.optInt(0) ?: -1
-                val gap = if (lastEnemyAt > 0) {
-                    Math.round((now - lastEnemyAt) / 1000.0)
-                } else {
-                    -1
-                }
+            if (!diedNow && !wasSpectating && now - hpMissingSince > 1200) {
                 events.add(
                     JSONObject().put("kind", "death")
-                        .put("hpBefore", before)
-                        .put("enemyCount", lastEnemyCount)
-                        .put("secondsSinceEnemy", gap)
                         .put("spectating", true)
+                        .put("enemyCount", lastEnemyCount)
+                        .put("secondsSinceEnemy", secondsSinceEnemy())
                 )
+                wasSpectating = true
                 hpMissingSince = 0L
                 // 清掉，避免下一帧又判一次死
                 previous.remove("hp")
@@ -549,7 +574,13 @@ class CompanionService : Service() {
         // 关键事件写进对局记忆，陪玩后面能引用「你刚才死过一次」这种事
         for (event in events) {
             when (event.optString("kind")) {
-                "death" -> remember("你被杀了（当时血量 ${event.optInt("hpBefore")}）")
+                "death" -> {
+                    val watched = event.optString("watched", "")
+                    remember(
+                        if (watched.isNotBlank()) "你死了，正在观战 $watched"
+                        else "你死了（切到了观战视角）"
+                    )
+                }
                 "hurt" -> remember("你挨了一下，${event.optInt("from")} 掉到 ${event.optInt("to")}")
                 "allyKillsChange" -> remember("你们拿下第 ${event.optInt("to")} 个人头")
                 "enemyKillsChange" -> remember("对面拿下第 ${event.optInt("to")} 个人头")
@@ -628,16 +659,18 @@ class CompanionService : Service() {
             when (event.optString("kind")) {
                 "death" -> {
                     died = true
-                    val hpBefore = event.optInt("hpBefore", 0)
                     val gap = event.optInt("secondsSinceEnemy", -1)
                     val enemies = event.optInt("enemyCount", 0)
+                    val watched = event.optString("watched", "")
                     val text = when {
                         enemies > 0 && gap in 0..8 ->
                             "你刚被对面的人打死了（${gap}秒前画面里还有 $enemies 个）"
                         enemies > 0 -> "你被对面的人打死了"
                         else -> "你死了"
                     }
-                    notes.put("$text，刚才血量还有 $hpBefore")
+                    notes.put(
+                        if (watched.isNotBlank()) "$text，现在在观战 $watched" else text
+                    )
                 }
                 "hurt" -> notes.put(
                     "你挨了一下，血量从 ${event.optInt("from")} 掉到 ${event.optInt("to")}"
@@ -870,6 +903,14 @@ class CompanionService : Service() {
          * 死亡/敌人露头这类事件不受这个限制。
          */
         private const val MIN_ASK_GAP_MS = 4_000L
+
+        /**
+         * 观战名字连续出现几帧才算确认死亡。
+         *
+         * 手机 320ms 拉一次，2 帧约 640ms —— 比 OCR 单帧误读稳，又不至于让
+         * 「你死了」这句话晚 1 秒才出口。
+         */
+        private const val SPECTATE_CONFIRM_FRAMES = 2
         private const val POLL_IDLE_MS = 220L
         /**
          * YOLO 检测间隔的兜底值。

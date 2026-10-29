@@ -179,6 +179,10 @@ class FieldSpec:
     enhance: str = ""          # "" | "bright"，先做预处理再送 OCR
     enhance_pct: float = 88.0  # bright 模式保留多亮算「字」
     loose_clock: bool = False  # 计时器冒号丢失时按 M:SS 还原
+    # 读不到时是否沿用上一次的值。
+    # 数值类要沿用（避免血量数字凭空消失），但「存在性」字段必须关掉：
+    # spectate 曾经读到过队友名字，复活后读不到，沿用旧值就会一直判成死亡。
+    sticky: bool = True
     pattern: re.Pattern | None = dataclass_field(default=None, repr=False)
 
 
@@ -235,6 +239,7 @@ def build_specs(config: dict) -> tuple[list[FieldSpec], list[FieldSpec]]:
             purpose=entry.get("purpose", ""),
             min_score=entry.get("min_score"),
             crop_tight=bool(entry.get("crop_tight", True)),
+            sticky=bool(entry.get("sticky", True)),
             enhance=str(entry.get("enhance") or "").lower(),
             enhance_pct=float(entry.get("enhancePct") or 88.0),
             loose_clock=bool(entry.get("looseClock", False)),
@@ -404,11 +409,15 @@ class HudReader:
             if ok:
                 fresh[spec.name] = {"value": value, "ok": True, "at": time.time(),
                                     "text": text, "score": round(score, 3)}
-            else:
-                # 这一帧读不出来：保留上一次的值，但 ok=False、at 不更新，
+            elif spec.sticky:
+                # 数值字段：读不出来时保留上一次的值，但 ok=False、at 不更新，
                 # snapshot 会把它放进 unstable，而不是让数字凭空消失。
                 fresh[spec.name] = {"value": previous.get("value"), "ok": False,
                                     "at": previous.get("at", 0.0),
+                                    "text": text, "score": round(score, 3)}
+            else:
+                # 存在性字段：读不到就是真的没了，别沿用旧值
+                fresh[spec.name] = {"value": None, "ok": False, "at": 0.0,
                                     "text": text, "score": round(score, 3)}
         self.last_ms = (time.perf_counter() - started) * 1000
         self.reads += 1

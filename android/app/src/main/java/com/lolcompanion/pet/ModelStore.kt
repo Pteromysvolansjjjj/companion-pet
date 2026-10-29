@@ -38,18 +38,68 @@ class ModelStore(private val context: Context) {
         if (profile.isBlank() || profile == PROFILE_GENERIC) File(dir, "labels.txt")
         else File(dir, "$profile.labels.txt")
 
-    /** 找这个档位能用的权重：手填路径 → 档位专属 → 通用 current.tflite → 内部存储兜底。 */
+    /** 找这个档位能用的权重：手填路径 → 档位专属 → 通用 current.tflite → 内置 → 内部存储兜底。 */
     fun resolve(profile: String, overridePath: String = ""): File? {
         val override = if (overridePath.isBlank()) null else File(overridePath)
-        return listOfNotNull(override, modelFile(profile), genericModel, internalFallback)
-            .firstOrNull { it.isFile && it.length() > 1024 }
+        return listOfNotNull(
+            override, modelFile(profile), genericModel,
+            ensureBundled(profile), internalFallback
+        ).firstOrNull { it.isFile && it.length() > 1024 }
+    }
+
+    /**
+     * assets 里自带的模型，首次启动时复制到私有目录。
+     *
+     * TFLite 要从真实文件路径 mmap，读不了 assets 里的压缩条目。
+     * 45MB 复制一次约 1 秒，之后每个档位都直接命中，不再做 IO。
+     *
+     * 之前的版本漏了这一步，也没往 assets 里放模型文件，结果
+     * resolve() 全部落空 → detector 为 null → 手机端从不请求图像
+     * （PC 端 /info 的 requests.image 永远是 0）。这就是「AI 看不到画面」的根因。
+     *
+     * 复制失败（空间不足等）返回 null，让上层退回「仅对话」而不是崩掉。
+     */
+    private fun ensureBundled(profile: String): File? {
+        if (profile.isBlank() || profile == PROFILE_GENERIC) return null
+        val modelsDir = File(context.filesDir, "models")
+        val target = File(modelsDir, "$profile.tflite")
+        if (target.isFile && target.length() > 1024) return target
+        val labels = File(modelsDir, "$profile.labels.txt")
+        return try {
+            modelsDir.mkdirs()
+            context.assets.open("models/$profile.tflite").use { input ->
+                target.outputStream().use { output -> input.copyTo(output, 128 * 1024) }
+            }
+            if (!labels.isFile) {
+                context.assets.open("models/$profile.labels.txt").use { input ->
+                    labels.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+            target
+        } catch (error: IOException) {
+            target.delete()
+            null
+        }
     }
 
     fun readLabels(profile: String): List<String> {
-        for (file in listOf(labelsFile(profile), File(dir, "labels.txt"))) {
+        for (file in listOf(
+            labelsFile(profile),
+            File(dir, "labels.txt"),
+            File(File(context.filesDir, "models"), "$profile.labels.txt")
+        )) {
             if (!file.isFile) continue
             val lines = file.readLines().map { it.trim() }.filter { it.isNotEmpty() }
             if (lines.isNotEmpty()) return lines
+        }
+        try {
+            context.assets.open("models/$profile.labels.txt")
+                .bufferedReader().useLines { sequence ->
+                    val lines = sequence.map { it.trim() }.filter { it.isNotEmpty() }.toList()
+                    if (lines.isNotEmpty()) return lines
+                }
+        } catch (error: IOException) {
+            // 没有内置标签，继续退到 coco.names
         }
         return try {
             context.assets.open("coco.names").bufferedReader().useLines { sequence ->
