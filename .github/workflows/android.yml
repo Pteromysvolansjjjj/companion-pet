@@ -44,14 +44,21 @@ jobs:
           cp "$APK" "phone/dist/lolcompanion-pet-${GITHUB_RUN_NUMBER}.apk"
           ls -lh phone/dist/
 
+      - name: 生成版本 tag
+        id: tag
+        run: |
+          # 零填充必须用 shell 算：Actions 的 format('{0:0000}', ...) 会因为
+          # github.run_number 是字符串类型而报 "format specifiers not valid"。
+          echo "name=v$(printf '%04d' "${{ github.run_number }}")" >> "$GITHUB_OUTPUT"
+
       - name: 挂到 Release（Artifact 下载要登录，Release 不用）
         uses: softprops/action-gh-release@v2
         with:
           # 必须零填充。之前用 apk-<run>，字母序里 "apk-9" 大于 "apk-16"，
           # Releases 页面就把 apk-9 排在最上面，看着像没有新版本。
           # 前缀也换成 v：'v' > 'a'，新的全都排在旧的 apk-* 之前。
-          tag_name: v${{ format('{0:0000}', github.run_number) }}
-          name: 陪玩桌宠 v${{ github.run_number }}
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: 陪玩桌宠 ${{ steps.tag.outputs.name }}
           body: |
             自动构建的 debug 版 APK，手机上直接下载安装。
             这是当前**最新**的版本，以后每次构建都会排在最上面。
