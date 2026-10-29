@@ -62,6 +62,9 @@ class CompanionService : Service() {
     /** 降频期间复用的检测结果。 */
     private var cachedObjects = emptyList<Triple<String, Int, String>>()
 
+    /** PC 最近一次下发的画面宽度，用来挑对应分辨率的模型。 */
+    private var lastSentWidth = 0
+
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
@@ -129,7 +132,6 @@ class CompanionService : Service() {
                 DEFAULT_PROFILE
             }
         }
-        var loadedProfile = profile
         prefs.lastProfile = profile
         loadDetector(store, profile)
 
@@ -141,6 +143,8 @@ class CompanionService : Service() {
             try {
                 val tick = ticker?.pull(detector != null) ?: break
                 failures = 0
+
+                if (tick.sentWidth > 0) lastSentWidth = tick.sentWidth
 
                 // 玩家说话优先回：即使这一帧画面没变也要应答
                 var answeredPlayer = false
@@ -156,9 +160,8 @@ class CompanionService : Service() {
 
                 // PC 端换了 --profile：同一个 APK 自动换模型，不用手点
                 if (prefs.profileMode == Prefs.PROFILE_AUTO &&
-                    tick.profile.isNotBlank() && tick.profile != loadedProfile
+                    tick.profile.isNotBlank() && tick.profile != profile
                 ) {
-                    loadedProfile = tick.profile
                     profile = tick.profile
                     prefs.lastProfile = profile
                     loadDetector(store, profile)
@@ -214,8 +217,11 @@ class CompanionService : Service() {
                     continue
                 }
 
+                val shownDetector = detector
                 PetBus.status("已连接 · ${tick.ocrMs.toInt()}ms" +
-                    detectSuffix(objects, detector != null))
+                    detectSuffix(objects, shownDetector != null,
+                        shownDetector?.lastDetectMs ?: 0.0,
+                        shownDetector?.usingGpu == true))
                 PetBus.stats(buildStats(profile, values, objects))
 
                 if (due && !answeredPlayer) {
@@ -256,7 +262,16 @@ class CompanionService : Service() {
             PetBus.status("档位 none：只对话、不检测")
             return
         }
-        val file = store.resolve(profile, prefs.modelPath)
+        // 按 PC 下发的宽度自动挑模型：1920 宽的图配 1280 模型，放大也是白搭；
+        // 反过来 640 的图配 1280 模型只是插值，慢 4 倍还没有新信息。
+        val suffix = when {
+            lastSentWidth >= 1200 -> "1280"
+            lastSentWidth >= 900 -> "960"
+            else -> ""
+        }
+        val sizedProfile = if (suffix.isEmpty()) profile else "$profile$suffix"
+        val file = store.resolve(sizedProfile, prefs.modelPath)
+            ?: store.resolve(profile, prefs.modelPath)
         if (file == null) {
             PetBus.status("档位 $profile 没有模型，仅对话")
             return
@@ -264,7 +279,9 @@ class CompanionService : Service() {
         try {
             val loaded = Detector(file, store.readLabels(profile))
             detector = loaded
-            PetBus.status("模型 $profile 就绪${if (loaded.usingGpu) " · GPU" else ""}")
+            PetBus.status(
+                "模型 ${file.name} 就绪${if (loaded.usingGpu) " · GPU" else " · CPU"}"
+            )
         } catch (error: Throwable) {
             PetBus.status("模型 $profile 加载失败：${error.message ?: error.javaClass.simpleName}")
         }
@@ -609,7 +626,10 @@ class CompanionService : Service() {
             bits.add("${values.optInt("allyKills")}:${values.optInt("enemyKills")}")
         }
         if (values.has("level")) bits.add("${values.optInt("level")} 级")
-        val detected = detectSuffix(objects, true).removePrefix(" · ")
+        val detected = detectSuffix(
+            objects, true,
+            detector?.lastDetectMs ?: 0.0, detector?.usingGpu == true
+        ).removePrefix(" · ")
         if (detected.isNotEmpty() && detected != "未检出目标") bits.add(detected)
         return bits.joinToString(" · ")
     }
@@ -622,10 +642,13 @@ class CompanionService : Service() {
      */
     private fun detectSuffix(
         objects: List<Triple<String, Int, String>>,
-        hasDetector: Boolean
+        hasDetector: Boolean,
+        costMs: Double = 0.0,
+        onGpu: Boolean = false
     ): String {
         if (!hasDetector) return " · 仅对话（无模型）"
-        if (objects.isEmpty()) return " · 未检出目标"
+        val cost = if (costMs > 0) " ${costMs.toInt()}ms${if (onGpu) " GPU" else " CPU"}" else ""
+        if (objects.isEmpty()) return " · 未检出$cost"
         val text = objects.joinToString(" ") { (label, count, _) ->
             val short = when (label.trim().lowercase()) {
                 "enemy" -> "敌"
@@ -635,7 +658,7 @@ class CompanionService : Service() {
             }
             "$short×$count"
         }
-        return " · $text"
+        return " · $text$cost"
     }
 
     private fun holdMillisFor(text: String): Long =

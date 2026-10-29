@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.SystemClock
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
@@ -64,6 +65,10 @@ class Detector(
     var usingGpu: Boolean = false
         private set
 
+    /** 上一次 detect 的总耗时（预处理 + 推理 + NMS），毫秒。 */
+    var lastDetectMs: Double = 0.0
+        private set
+
     init {
         var delegate: GpuDelegate? = null
         val options = Interpreter.Options().setNumThreads(threads)
@@ -116,6 +121,7 @@ class Detector(
     }
 
     fun detect(bitmap: Bitmap): List<Detection> {
+        val startedAt = SystemClock.elapsedRealtimeNanos()
         val originalWidth = bitmap.width
         val originalHeight = bitmap.height
         if (originalWidth <= 0 || originalHeight <= 0) return emptyList()
@@ -234,6 +240,7 @@ class Detector(
             )
         }
         if (cropped) source.recycle()
+        lastDetectMs = (SystemClock.elapsedRealtimeNanos() - startedAt) / 1_000_000.0
         return result
     }
 
