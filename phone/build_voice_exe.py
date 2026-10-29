@@ -104,7 +104,8 @@ def main() -> int:
     print("  双击 exe            直接开始全程录音，说完自动送到手机")
     print("  加 --selftest 参数   录 5 秒转写一次，先验证麦克风通不通")
     print("  加 --port 8770      改 PC 采集服务的端口")
-    print("\n模型别删：exe 会从同级 voice/faster-whisper-small 读。")
+    print(f"\n模型别删：exe 会从同级 voice/{MODEL_DST.name} 读。"
+          f"想换 small 就把那个目录也放进 voice/。")
     return 0
 
 
