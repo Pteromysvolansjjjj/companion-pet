@@ -87,7 +87,7 @@ object DeepSeek {
                     .put("model", currentModel)
                     .put("stream", false)
                     .put("temperature", 1.0)
-                    .put("max_tokens", 100)
+                    .put("max_tokens", 80)
                     // 压一下复读：同一场对话里反复说同一句会很劝退
                     .put("presence_penalty", 0.6)
                     .put("frequency_penalty", 0.4)

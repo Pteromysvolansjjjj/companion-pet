@@ -168,8 +168,8 @@ def main() -> int:
                         help="always 模式相对噪声底的倍数，调大更不容易误触发")
     parser.add_argument("--min-chars", type=int, default=2,
                         help="识别结果少于此字数就丢弃")
-    parser.add_argument("--silence-ms", type=int, default=800,
-                        help="静音多久算一句话说完")
+    parser.add_argument("--silence-ms", type=int, default=450,
+                        help="静音多久算一句话说完（越小越快，但容易切断句子）")
     parser.add_argument("--model", default="", help="faster-whisper 模型目录（默认自动找）")
     parser.add_argument("--selftest", action="store_true",
                         help="录 5 秒转写一次，确认麦克风和模型都通")
@@ -342,8 +342,15 @@ def main() -> int:
     print("=" * 58)
 
     if args.mode == "always":
+        # 模型没加载完之前说话是没人理的，明确等它就绪再提示
+        print("  正在加载语音模型…", flush=True)
+        load_started = time.monotonic()
+        if service.wait_ready(180):
+            print(f"  模型就绪（{int(time.monotonic() - load_started)} 秒），"
+                  f"现在就可以说话了", flush=True)
+        else:
+            print("  模型加载超时：第一句会多等一会儿", flush=True)
         # 打印一次噪声底，方便用户判断灵敏度
-        time.sleep(2.0)
         info = service.status()
         print(f"  当前噪声底 {info.get('noise')}  触发门限 {info.get('gate')}"
               f"（嫌太灵敏就调大 --floor）", flush=True)

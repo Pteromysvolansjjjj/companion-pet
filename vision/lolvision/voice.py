@@ -371,6 +371,15 @@ class AlwaysOnVoice(VoiceService):
         data["gate"] = round(max(self.floor, self._noise * self.factor), 5)
         return data
 
+    def wait_ready(self, timeout: float = 180.0) -> bool:
+        """等模型加载完。没就绪时说话不会有人理，先让用户知道要等。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._model is not None:
+                return True
+            time.sleep(0.2)
+        return self._model is not None
+
     # -------------------------------------------------------------- capture
     def _on_audio(self, indata, _frames, _time_info, _status) -> None:
         block = indata[:, 0].copy()
@@ -419,6 +428,13 @@ class AlwaysOnVoice(VoiceService):
         # 送去识别前先裁掉首尾静音，Whisper 更准
         audio = trim_silence(audio, SAMPLE_RATE)
         duration_ms = int(len(audio) / SAMPLE_RATE * 1000)
+        # 队列积压说明游戏音效在疯狂误触发：丢掉最旧的，别让真句子排不上队
+        while self._job.qsize() >= 2:
+            try:
+                self._job.get_nowait()
+                self.log("[voice] 转写积压，丢掉一条旧的")
+            except queue.Empty:
+                break
         self._set_state("transcribing")
         self._job.put((audio, duration_ms, reason))
 
