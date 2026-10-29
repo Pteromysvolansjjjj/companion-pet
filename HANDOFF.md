@@ -304,3 +304,48 @@ PC(Windows)                                         手机(iQOO Neo10 / 8 Gen 3 
 
 校准后 `valorant.yaml` 的 `calibrated` 改成 **true**。两张截图实测：9 个字段全部读对，
 持刀时弹药正确进 `unstable`。LoL 与三角洲档位仍是占位值（false）。
+
+---
+
+## 15. 当前状态总览（2026-10-30 凌晨）
+
+这一节是给下一次接手的人看的：什么能跑、什么不能跑、素材在哪。
+
+### 15.1 能跑通的
+
+| 能力 | 状态 | 关键文件 |
+|---|---|---|
+| PC 截屏 + OCR 读 HUD | 可用，2560×1440 实测 | `phone/pc_capture.py`、`phone/profiles/valorant.yaml` |
+| 语音 → 文字 → 手机 | 可用，base 模型 636ms | `phone/pc_voice.py`、`vision/lolvision/voice.py` |
+| 桌面录屏（20fps 1440p） | 可用，实测 20.00fps | `phone/record_screen.py`、`录制屏幕.bat` |
+| 观战视角死亡判定 | 坐标已实测校准 | `spectate` 字段 + `CompanionService.trackEvents` |
+| 状态变化时间线 | 可用，成本 +14~24% | `Timeline.kt` |
+| 多轮对话 + 对局记忆 | 可用 | `DeepSeek.kt`、`CompanionService` |
+
+### 15.2 不能跑 / 待修的
+
+**手机端 YOLO 从来没跑过。** APK 的 assets 里一直没有模型文件，
+`ModelStore.resolve()` 四条路径全落空 → `detector == null` → 不请求图像。
+PC 端 `/info` 的 `requests.image` 永远是 0，这是最硬的证据。
+
+修法已写进代码（assets/models/ + `ensureBundled()`），但 **APK 还没重新构建**。
+装上新包后第一件事就是看 `/info` 的 `requests.image` 是否开始增长。
+
+### 15.3 素材
+
+`logs/capture/hud-*.mp4` —— 2026-10-30 凌晨一局，**19 段 / 19.1 分钟 / 2.2GB**：
+
+- 覆盖率 97%，只有 1 处 25 秒断档（切全屏触发 DXGI_ERROR_ACCESS_LOST）
+- 12.8 分钟是真正对局画面（高码率段 170–200 MB/分钟）
+- `ref-spectate.jpg` 观战帧、`ref-self-full.jpg` 本人帧，是 spectate 坐标的依据
+
+盘点工具：`tools/inspect_record.py`。
+
+### 15.4 已知限制
+
+1. **ddagrab 遇全屏切换会退出**（`AcquireNextFrame failed: 887a0026`）。
+   必须外层跑看门狗循环，或让游戏用「全屏窗口」模式。
+2. **本地无 JDK**，Kotlin 只能靠 CI 编译。`tools/check_kotlin.py` 覆盖三类
+   常见错误：括号不平衡、中文紧跟变量名、val 字段被赋值。
+3. **QSV 编码反而更慢**（27.4fps vs libx264 30fps）。原因：ddagrab 出 d3d11 帧，
+   必须先 hwdownload 回内存再做 bgra→nv12，这段 swscale 单线程。录屏默认 libx264。
