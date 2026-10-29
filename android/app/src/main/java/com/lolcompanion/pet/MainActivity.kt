@@ -38,13 +38,19 @@ class MainActivity : AppCompatActivity() {
 
     private val pickModel = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@registerForActivityResult
-        toast("正在导入模型…")
+        toast("正在导入…")
         Thread {
             try {
                 val profile = pendingProfile
                 val file = ModelStore(this).importFrom(uri, profile)
+                val size = if (file.name.endsWith(".labels.txt")) {
+                    val count = file.readLines().count { it.isNotBlank() }
+                    "$count 个类别"
+                } else {
+                    "%.1f MB".format(file.length() / 1024.0 / 1024.0)
+                }
                 runOnUiThread {
-                    toast("已导入 $profile：${file.name}（${file.length() / 1024 / 1024} MB），重启服务生效")
+                    toast("已导入 $profile：${file.name}（$size），重启服务生效")
                 }
             } catch (error: Throwable) {
                 runOnUiThread { toast("导入失败：${error.message}") }
@@ -163,7 +169,7 @@ class MainActivity : AppCompatActivity() {
         val intervalInput = editText(prefs.intervalSec.toString(), "常规点评间隔（秒）").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
         }
-        val modelInput = editText(prefs.modelPath, "模型路径（留空按档位自动）")
+        val modelInput = editText(prefs.modelPath, "模型路径（一般留空，用「换模型」导入即可）")
         val profileRow = TextView(this).apply {
             text = "游戏档位：" + profileLabel(prefs.profileMode)
             setTextColor(Color.parseColor("#E9F0FF"))
@@ -227,7 +233,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showModelDialog(profile: String) {
         val name = if (profile == Prefs.PROFILE_NONE) ModelStore.PROFILE_GENERIC else profile
-        val actions = arrayOf("从文件选择 .tflite", "从 URL 下载", "清除 $name 的模型")
+        val actions = arrayOf("从文件选择（.tflite 或 labels.txt）", "从 URL 下载", "清除 $name 的模型")
         AlertDialog.Builder(this)
             .setTitle("模型热换 → $name.tflite")
             .setItems(actions) { _, which ->

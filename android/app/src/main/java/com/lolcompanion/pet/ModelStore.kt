@@ -2,6 +2,7 @@ package com.lolcompanion.pet
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -68,22 +69,40 @@ class ModelStore(private val context: Context) {
         return names.sorted()
     }
 
-    /** 从系统文件选择器导入，直接覆盖该档位的权重。 */
+    /**
+     * 从系统文件选择器导入。
+     *
+     * 按扩展名分流：`.tflite` 写到 ``<profile>.tflite``，`.txt` / `.names` 写到
+     * ``<profile>.labels.txt``。标签文件必须能单独导入——缺少它时 [readLabels] 会退回
+     * `assets/coco.names`，4 类模型的 0-3 号会被叫成 person/bicycle/car/motorcycle。
+     */
     @Throws(IOException::class)
     fun importFrom(uri: Uri, profile: String): File {
-        val target = modelFile(profile)
+        val display = displayName(uri).orEmpty().lowercase()
+        val isLabels = display.endsWith(".txt") || display.endsWith(".names")
+        val target = if (isLabels) labelsFile(profile) else modelFile(profile)
+        val minBytes = if (isLabels) 4L else 1024L
+
         val temp = File(dir, "${target.name}.tmp")
         context.contentResolver.openInputStream(uri).use { input ->
             requireNotNull(input) { "打不开这个文件" }
             temp.outputStream().use { output -> input.copyTo(output) }
         }
-        if (temp.length() < 1024) {
+        if (temp.length() < minBytes) {
             temp.delete()
-            throw IOException("文件太小，不像是 tflite 模型")
+            throw IOException(if (isLabels) "标签文件太小，不像类别列表" else "文件太小，不像是 tflite 模型")
         }
         if (target.exists()) target.delete()
         if (!temp.renameTo(target)) throw IOException("写入 ${target.name} 失败")
         return target
+    }
+
+    private fun displayName(uri: Uri): String? = try {
+        context.contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    } catch (error: Throwable) {
+        null
     }
 
     /** 从 URL 下载模型，先落临时文件再替换。 */
