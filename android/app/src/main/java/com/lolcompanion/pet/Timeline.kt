@@ -44,7 +44,7 @@ class Timeline(
 
     private class Row(
         val fields: List<String>,
-        val text: String,
+        var text: String,
         var weight: Int,
         val from: Double,
         var to: Double
@@ -101,7 +101,7 @@ class Timeline(
             reference = sample
             val fields = changes.map { it.first }
             var weight = index
-            for (field in fields) weight += FIELD_WEIGHT[field] ?: 5
+            for (field in fields) weight += (FIELD_WEIGHT[field] ?: 5)
             weight += bonus(sample)
             val seconds = (sample.at - base.at) / 1000.0
             rows.add(
