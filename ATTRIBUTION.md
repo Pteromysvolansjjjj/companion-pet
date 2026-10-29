@@ -1,10 +1,24 @@
 # 来源与许可说明
 
+## 上游项目（本仓库的底层来源）
+
+- 上游仓库：[jinghuashuiyue2004/dsh-plugin-lol-companion](https://github.com/jinghuashuiyue2004/dsh-plugin-lol-companion)
+- 上游作者：**`jinghuashuiyue2004` —— 本仓库底层实现的原作者**
+- 本 fork 起点：上游 v0.7.1；本仓库版本号 `0.7.1-screen.1`
+- 上游许可：MIT
+- **继承自上游**：数据连接（LCU + Live Client Data）、DSH 宿主适配、WPF 桌宠窗口与桌面通信、
+  会话与调度协议、`lol_tune` 工具、原有测试与文档骨架。
+- **本 fork 新增**：屏幕 OCR 数据源、手机端 YOLO 视觉链路（`phone/` + `android/`）、语音输入，
+  以及配套文档（`docs/SCREEN_OCR.md`、`docs/VOICE.md`、`phone/README.md`）。
+- 上游的演示视频与截图版权属于原作者，展示的是**上游原版**行为，不代表本 fork 的实际效果。
+
+本仓库不是 GitHub 意义上的 fork 标记仓库（历史重新推送过），因此在这里显式声明来源与作者。
+
 ## 本项目代码
 
 本项目自主编写的代码、文档和脚本采用 [MIT 许可证](LICENSE)。允许使用、修改、分发和商用，须保留版权及许可声明。包元数据为 `license: "MIT"`；`private: true` 只防止误发布到 npm，不影响 GitHub 开源。
 
-数据连接、DSH 适配及 WPF 窗口代码独立实现；移动、缩放、设置等交互参考上游并按本项目需求重新实现。第三方美术、证书及保留的上游声明不因根目录 LICENSE 自动取得本项目的 MIT 授权，其来源和权利范围如下。
+数据连接、DSH 适配及 WPF 窗口代码来自上游项目（见上一节），本 fork 未重写这部分；移动、缩放、设置等交互同样来自上游。本 fork 新增的 `phone/`、`android/`、屏幕 OCR 与语音相关代码沿用同一 MIT 许可。第三方美术、证书及保留的上游声明不因根目录 LICENSE 自动取得本项目的 MIT 授权，其来源和权利范围如下。
 
 ## 人物素材
 

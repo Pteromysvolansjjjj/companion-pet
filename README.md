@@ -1,21 +1,44 @@
-# LOL 陪玩数据插件
+# LOL 陪玩数据插件（手机 YOLO 视觉改造版）
 
 **把英雄联盟实时数据接进你原有的 DeepSeek Harness 对话，让你养的角色通过桌宠陪你玩。**
 
-演示视频：【我把大肥鱼拉到LOL当陪玩娘了】 https://www.bilibili.com/video/BV1axHV6EErM/?share_source=copy_web&vd_source=63af640136307ef4b250dddc1f4d121b
+## 来源与致谢（重要）
 
-插件读取本机 LOL 客户端和对局接口，将数据交给当前绑定的对话，再把模型的最终纯文本回复显示在桌宠气泡里。性格、知识、记忆和说什么，由原会话、用户及其已有工具决定。
+本项目 fork 自 [**jinghuashuiyue2004/dsh-plugin-lol-companion**](https://github.com/jinghuashuiyue2004/dsh-plugin-lol-companion)（v0.7.1，MIT）。
+
+**上游作者 `jinghuashuiyue2004` 是本仓库底层实现的原作者。** 数据连接、DSH 宿主适配、
+WPF 桌宠窗口、会话协议、配置与调度这些基础能力全部来自他的项目；本项目只在其之上改了
+**画面数据的获取与推理路径**，没有他的工作就没有这个仓库。
+
+下面的演示视频是**原作者的视频**，展示的是**上游原版**的行为（走官方接口那条路），不是本 fork 的实拍：
+
+> 演示视频（原作者）：【我把大肥鱼拉到LOL当陪玩娘了】 https://www.bilibili.com/video/BV1axHV6EErM/?share_source=copy_web&vd_source=63af640136307ef4b250dddc1f4d121b
+
+## 与原项目的区别：手机 YOLO 视觉 vs 官方接口
+
+| | 上游原版 | 本项目（fork） |
+| --- | --- | --- |
+| 数据来源 | **直接调用 LoL 官方本地接口**（LCU + Live Client Data），拿结构化对局数据 | PC 只采集画面 + OCR 读少量 HUD 数字，**画面理解交给手机端 YOLO（TFLite）** |
+| 视觉推理位置 | 无（不读像素） | **手机端**（骁龙 8 Gen 3，YOLOv8 tflite），不占 PC 算力 |
+| 送给模型的内容 | 接口事件与状态 | `{game, scene, hud, events}`：YOLO 检出的类别/数量/画面三分区 + OCR 数字 + 事件 |
+| 适用场景 | 依赖客户端与对局，联机可用 | 面向**单机/离线与人机局**；靠像素理解画面，不依赖接口 |
+
+本项目**保留了接口路径**（`lol_tune` 里 `dataSource: "api"` 可切回），但主推的是手机 YOLO 这条链路：
+手机同一 APK 按 `--profile` 切换不同游戏的模型（瓦罗兰特 / 三角洲 / LoL），详见 [phone/README.md](phone/README.md)。
+
+插件读取数据源后交给当前绑定的对话，再把模型的最终纯文本回复显示在桌宠气泡里。性格、知识、记忆和说什么，由原会话、用户及其已有工具决定。
 
 当前版本：**0.7.1-screen.1**（本 fork）。运行环境：**Windows + DeepSeek Harness**；已验证宿主版本为 **0.2.1-rc.2**。
 
 ## 本 fork 的改动
 
-在原有接口数据源之外，增加了两条本机链路，其余行为不变：
+在原有接口数据源之外，增加了三条本机链路，其余行为不变：
 
 - **屏幕 OCR 数据源（默认）**：不调用 LCU/Live Client API，改为截取游戏窗口，本地识别顶栏计时/比分、击杀播报、等级与中心公告，按原有 `lol_update` 协议投给同一会话。见 [docs/SCREEN_OCR.md](docs/SCREEN_OCR.md)。
+- **手机端视觉推理**：PC 只负责抓帧 + OCR 数字（`phone/pc_capture.py` 的 `/tick`），画面理解交给手机上的 YOLO（`android/`，TFLite），融合成 `{game, scene, hud, events}` 再调 DeepSeek。按 `--profile` 切换游戏档位与模型。见 [phone/README.md](phone/README.md)。
 - **语音输入**：按住热键（默认 F2）说话，本地 Whisper 转写成文字，作为普通用户消息进入原对话，不打开窗口、不注入游戏。见 [docs/VOICE.md](docs/VOICE.md)。
 
-想在两者之间切换：`lol_tune` 里设 `dataSource: "screen" | "api"`。语音只依赖侧车，与数据源无关。
+想在数据源之间切换：`lol_tune` 里设 `dataSource: "screen" | "api"`。语音只依赖侧车，与数据源无关。
 
 首次使用本 fork 需安装 Python 侧车（约 500 MB 模型）：
 
