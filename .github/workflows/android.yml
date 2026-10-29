@@ -47,14 +47,19 @@ jobs:
       - name: 挂到 Release（Artifact 下载要登录，Release 不用）
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: apk-${{ github.run_number }}
-          name: 陪玩桌宠 APK #${{ github.run_number }}
+          # 必须零填充。之前用 apk-<run>，字母序里 "apk-9" 大于 "apk-16"，
+          # Releases 页面就把 apk-9 排在最上面，看着像没有新版本。
+          # 前缀也换成 v：'v' > 'a'，新的全都排在旧的 apk-* 之前。
+          tag_name: v${{ format('{0:0000}', github.run_number) }}
+          name: 陪玩桌宠 v${{ github.run_number }}
           body: |
             自动构建的 debug 版 APK，手机上直接下载安装。
+            这是当前**最新**的版本，以后每次构建都会排在最上面。
 
-            - 包名 `com.lolcompanion.pet`
+            - 包名 `com.lolcompanion.pet`，同包名可直接覆盖安装
             - 安装后先在设置里填电脑地址（例如 `192.168.1.10:8770`）和 DeepSeek Key
             - 手机与电脑需在同一 Wi-Fi
+            - 手机必须亮屏，否则系统会冻结前台服务
           files: phone/dist/*.apk
           fail_on_unmatched_files: true
         env:
