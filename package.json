@@ -58,7 +58,8 @@
     "phone:selftest": "node vision/run.mjs ../phone/selftest.py",
     "phone:capture": "node vision/run.mjs ../phone/pc_capture.py",
     "phone:calibrate": "node vision/run.mjs ../phone/calibrate.py",
-    "phone:runner": "node vision/run.mjs ../phone/desktop_runner.py"
+    "phone:runner": "node vision/run.mjs ../phone/desktop_runner.py",
+    "phone:voice": "node vision/run.mjs ../phone/pc_voice.py"
   },
   "engines": {
     "node": ">=22",

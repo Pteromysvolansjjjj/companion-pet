@@ -110,6 +110,8 @@ GET /tick?since=<seq>
   "ts": 1761650000.123,
   "size": [1920, 1080],
   "image": "<base64 jpeg>",
+  "say": [{"id": 7, "text": "这波该往哪走", "source": "voice", "at": 1761650000.5}],
+  "sayEpoch": 1761650000,
   "ocr": {
     "values": {"timer": 1421, "allyKills": 15, "enemyKills": 8, "level": 11, "score": [15, 8]},
     "unstable": [],
@@ -126,10 +128,61 @@ GET /tick?since=<seq>
 - `unstable`：字段读不到、或读数已经超过 `stale_ms` 没更新。仍然给值，但标注不可靠。
 - `calibrated`：ROI 是否在真实画面上校准过。现在是 `false`。
 
-其它端点：`/frame`（原始 JPEG）、`/info`（计数与当前值）、`/fields`（当前字段配置）、
-`/apk`（`phone/dist` 里最新的 APK）、`/apk/info`。
+- `say`：玩家说的话（来自 PC 麦克风或 PC 控制台），按 id 递增；手机带 `?say=<lastId>` 只取增量。
+- `sayEpoch`：进程世代号。PC 重启后队列从头编号，手机靠它把游标归零，不会漏掉新消息。
 
-## 3. 手机端
+其它端点：`/frame`（原始 JPEG）、`/info`（计数与当前值）、`/fields`（当前字段配置）、
+`/apk`（`phone/dist` 里最新的 APK）、`/apk/info`、`/say`（往队列里塞一句话）。
+
+## 3. 说话：PC 麦克风 → 手机陪玩
+
+陪玩在手机上，你在电脑这边说话。链路：
+
+```
+按住 F2 → PC 麦克风 → 本地 Whisper（不联网）→ 文字 POST /say
+   → 手机 /tick 增量取到 → DeepSeek → 手机气泡回你一句
+```
+
+### 用法
+
+采集服务要在跑，**另开一个窗口**：
+
+```powershell
+vision\.venv\Scripts\python.exe phone\pc_voice.py
+```
+
+启动后按住 **F2** 说话，松手。识别结果会打印在 PC 窗口，同时送到手机。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--hotkey` | F2 | 按住说话的热键；和游戏冲突就换 `--hotkey Ctrl+Alt+F2` |
+| `--mode` | push | `push`=按住说话；`toggle`=按一下开始、再按一下停 |
+| `--port` | 8770 | PC 采集服务的端口 |
+| `--model` | `vision/models/faster-whisper-small` | 本地 faster-whisper 模型目录 |
+| `--device` | 系统默认 | 麦克风设备序号，`--list-devices` 可列出 |
+| `--wav` | 无 | 离线转写一个 wav 就退出（自测用，不用麦克风） |
+
+- 模型是**本地的**（462MB，int8，CPU）：音频不上传、不出网，只有识别出的文字会走局域网。
+- 6 秒中文实测 1.7–2.5 秒出字。模型后台预热，第一次要多等 2–3 秒。
+- 识别完 POST 到 `http://127.0.0.1:8770/say`；采集服务没开会重试 3 次并提示。
+
+### 不想开麦克风也能说话
+
+1. **在采集服务的控制台窗口直接打字回车** → 同样送到手机（`source=typed`）。
+   双击 exe 运行时那个黑窗口就是输入口，不用装任何东西。
+2. 手机上气泡会先回显「你：……」再回你的问题，一问一答看得很清楚。
+
+### 协议
+
+```http
+POST /say
+{"text": "这波该往哪走", "source": "voice"}
+→ {"ok": true, "id": 7, "text": "这波该往哪走"}
+```
+
+`GET /say?since=<id>` 可以单独查队列，用来确认消息有没有真的到 PC。
+
+## 4. 手机端
 
 ### 拿 APK
 
@@ -181,10 +234,17 @@ GET /tick?since=<seq>
 自动跟随电脑 / 瓦罗兰特 / 三角洲 / 英雄联盟 / 仅对话。没有模型的档位降级为
 **只调 DeepSeek、无检测**，气泡照常出来。
 
-## 4. 校准 fields.yaml（重要）
+## 5. 校准 fields.yaml（重要）
 
-`phone/fields.yaml` 里的矩形是按 16:9 常见 HUD 位置估的**占位值**，没在真实画面上校准过。
-所以 `calibrated: false` 会一路传到手机，提示数字不可全信。
+各档位的校准状态不一样：
+
+| 档位 | calibrated | 说明 |
+|---|---|---|
+| `valorant` | true | 已在真实对局画面（1920x1080，购买阶段 + 交战阶段各一张）上用全图 OCR 定位过，9 个字段全部读对 |
+| `lol` | false | `phone/fields.yaml` 还是按 16:9 常见 HUD 位置估的占位值，没在真实画面上校准过 |
+| `delta` | false | 同上 |
+
+`calibrated: false` 会一路传到手机，提示数字不可全信。
 
 校准流程：
 
@@ -208,15 +268,23 @@ level       11              0.62   11        [0.372, 0.905, 0.028, 0.040]  54x43
 ```
 
 读不出的字段就改它的 `rect`（归一化坐标，原点左上角），重复到全部可读，
-再把 `fields.yaml` 顶部的 `calibrated` 改成 `true`。
+再把该档位 yaml 顶部的 `calibrated` 改成 `true`。
 
 字段支持：`kind`（int / float / pair / clock / text）、可选 `regex`（命名组 `a`/`b`/`v`/`m`+`s`）、
-`min`/`max` 边界、`scale` 换算、`min_score` 单独阈值、`enabled` 开关、`derive` 派生成对字段。
+`min`/`max` 边界、`scale` 换算、`min_score` 单独阈值、`enabled` 开关、`derive` 派生成对字段、
+`enhance: bright`（亮字提取，压在花背景上的低对比度数字需要它）、
+`enhancePct`（亮字阈值分位）、`looseClock`（计时器冒号被吞时按 M:SS 还原）。
 
 **单字符字段（如敌方击杀「8」）置信度天然只有 0.35–0.50**，所以 `ocr.min_score` 默认 0.30。
 靠 `min`/`max` 兜误读，不要靠提高阈值硬卡。
 
-## 5. 桌面验证版 runner
+瓦罗兰特档位有两个坑，都已经在 yaml 里处理了：
+
+- 弹药的分隔符是**弹匣图标**（三条竖杠）不是斜杠，所以拆成 `ammo`（弹匣）和
+  `ammoReserve`（备弹）两个字段分别读。
+- 回合计时在小图上「1:34」常被读成「134」，用 `looseClock: true` 按 M:SS 还原成 94 秒。
+
+## 6. 桌面验证版 runner
 
 APK 还没出来之前，用它验证「拉流 → 检测 → DeepSeek → 气泡文字」整条链：
 
@@ -245,7 +313,7 @@ $env:DEEPSEEK_API_KEY="sk-..."
 }
 ```
 
-## 6. 模型
+## 7. 模型
 
 第一版用官方 COCO 权重验证链路，再换自训/现成模型。**不要手写 `yolo export`**——Windows 上
 ultralytics 8.4 的 tflite 导出会直接报「只支持 Linux x86 和 macOS」，而且 `half=True` 已废弃、
@@ -264,7 +332,7 @@ ultralytics 8.4 的 tflite 导出会直接报「只支持 Linux x86 和 macOS」
 后处理是置信度过滤 + NMS，`Detector.kt` 按输出张量形状自适应类别数，84 类、4 类、2 类都能吃。
 详见 `phone/models/README.md`。
 
-## 7. 常见问题
+## 8. 常见问题
 
 | 现象 | 原因 |
 |---|---|

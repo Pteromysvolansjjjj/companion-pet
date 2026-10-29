@@ -33,6 +33,13 @@ class CompanionService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val previous = HashMap<String, Any>()
 
+    /** 最近一帧的上下文，玩家插话时即使这一帧没变也能拿来做答。 */
+    private var lastValues = JSONObject()
+    private var lastUnstable = emptyList<String>()
+    private var lastObjects = emptyList<Triple<String, Int, String>>()
+    private var lastEvents = emptyList<JSONObject>()
+    private var lastCalibrated = false
+
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
@@ -112,6 +119,12 @@ class CompanionService : Service() {
             try {
                 val tick = ticker?.pull(detector != null) ?: break
                 failures = 0
+
+                // 玩家说话优先回：即使这一帧画面没变也要应答
+                if (tick.say.isNotEmpty()) {
+                    handlePlayerTalk(tick.say, profile)
+                }
+
                 if (tick.unchanged) {
                     sleep(POLL_IDLE_MS)
                     continue
@@ -144,6 +157,12 @@ class CompanionService : Service() {
                         // 单帧推理失败不影响主循环
                     }
                 }
+
+                lastValues = values
+                lastUnstable = unstable
+                lastObjects = objects
+                lastEvents = events
+                lastCalibrated = tick.calibrated
 
                 val emptyHud = values.length() == 0
                 val due = events.isNotEmpty() ||
@@ -201,6 +220,26 @@ class CompanionService : Service() {
             PetBus.status("模型 $profile 就绪${if (loaded.usingGpu) " · GPU" else ""}")
         } catch (error: Throwable) {
             PetBus.status("模型 $profile 加载失败：${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    // ------------------------------------------------------------ 玩家插话
+    /**
+     * 玩家说了一句话（PC 麦克风识别后送来的），立刻回一句。
+     * 不受「点评间隔」限制——玩家主动问了就不该等。
+     */
+    private fun handlePlayerTalk(messages: List<Say>, profile: String) {
+        for (message in messages) {
+            val payload = buildPayload(
+                profile, lastValues, lastUnstable, lastCalibrated, lastObjects, lastEvents
+            ).put("ask", message.text).put("fromPlayer", true)
+            val (text, source) = DeepSeek.ask(payload, prefs.apiKey, prefs.deepseekModel, message.text)
+            val lines = DeepSeek.splitLines(text)
+            val pages = mutableListOf<String>()
+            pages.add("你：${message.text}")
+            pages.addAll(lines)
+            PetBus.say(pages, holdMillisFor(text))
+            updateNotification(buildNotification(lines.firstOrNull() ?: "…", source))
         }
     }
 

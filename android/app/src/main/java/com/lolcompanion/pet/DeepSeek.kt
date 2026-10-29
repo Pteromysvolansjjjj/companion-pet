@@ -29,12 +29,26 @@ object DeepSeek {
         "你是坐在玩家旁边看比赛的陪玩。语气像熟人，短句，口语，别端着。" +
             "只根据给你的 hud 数字和 scene 检测结果说话，不要编造没给你的信息。" +
             "每次回 1-2 句，总长不超过 45 个汉字，不要 Markdown，不要表情符号。" +
-            "玩家没问你就别讲道理，只点评眼前发生的事。"
+            "玩家没问你就别讲道理，只点评眼前发生的事。" +
+            "玩家开口问你时，先回答他，再补一句自己的判断。"
 
-    /** @return first = 文本, second = "deepseek" 或 "fallback"。 */
-    fun ask(payload: JSONObject, apiKey: String, model: String): Pair<String, String> {
+    /**
+     * @param playerText 玩家刚说的话；非空时当作对话来答，而不是自动播报。
+     * @return first = 文本, second = "deepseek" 或 "fallback"。
+     */
+    fun ask(
+        payload: JSONObject,
+        apiKey: String,
+        model: String,
+        playerText: String? = null
+    ): Pair<String, String> {
         if (apiKey.isBlank()) return fallback(payload) to "fallback"
         var currentModel = model.ifBlank { Prefs.DEFAULT_DS_MODEL }
+        val content = if (playerText.isNullOrBlank()) {
+            payload.toString()
+        } else {
+            payload.toString() + "\n\n玩家刚说：「" + playerText + "」——直接回应这句话。"
+        }
         repeat(2) { attempt ->
             try {
                 val body = JSONObject()
@@ -45,7 +59,7 @@ object DeepSeek {
                     .put(
                         "messages", JSONArray()
                             .put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
-                            .put(JSONObject().put("role", "user").put("content", payload.toString()))
+                            .put(JSONObject().put("role", "user").put("content", content))
                     )
                 val request = Request.Builder()
                     .url(URL)
@@ -96,6 +110,21 @@ object DeepSeek {
         val hud = payload.optJSONObject("hud")
         val values = hud?.optJSONObject("values") ?: JSONObject()
         val events = payload.optJSONArray("events") ?: JSONArray()
+        val objects = payload.optJSONObject("scene")?.optJSONArray("objects")
+        val top = if (objects != null && objects.length() > 0) objects.optJSONObject(0) else null
+        val timer = if (values.has("timer")) values.optInt("timer", -1) else -1
+        val clock = if (timer >= 0) "%d:%02d".format(timer / 60, timer % 60) else null
+
+        // 玩家开口问了，先应一声，别拿数据糊弄
+        if (payload.optBoolean("fromPlayer", false)) {
+            val hint = when {
+                top != null && top.optInt("count") >= 3 -> "那边人不少"
+                clock != null -> "$clock 这会儿"
+                else -> "画面挺安静"
+            }
+            return "我在，$hint。"
+        }
+
         for (index in 0 until events.length()) {
             val event = events.optJSONObject(index) ?: continue
             when (event.optString("kind")) {
@@ -107,10 +136,6 @@ object DeepSeek {
                 }
             }
         }
-        val objects = payload.optJSONObject("scene")?.optJSONArray("objects")
-        val top = if (objects != null && objects.length() > 0) objects.optJSONObject(0) else null
-        val timer = if (values.has("timer")) values.optInt("timer", -1) else -1
-        val clock = if (timer >= 0) "%d:%02d".format(timer / 60, timer % 60) else null
         if (top != null && top.optInt("count") >= 3) {
             val region = when (top.optString("region")) {
                 "left" -> "左边"

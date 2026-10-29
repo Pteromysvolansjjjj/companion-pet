@@ -169,6 +169,9 @@ class FieldSpec:
     purpose: str = ""
     min_score: float | None = None
     crop_tight: bool = True
+    enhance: str = ""          # "" | "bright"，先做预处理再送 OCR
+    enhance_pct: float = 88.0  # bright 模式保留多亮算「字」
+    loose_clock: bool = False  # 计时器冒号丢失时按 M:SS 还原
     pattern: re.Pattern | None = dataclass_field(default=None, repr=False)
 
 
@@ -225,6 +228,9 @@ def build_specs(config: dict) -> tuple[list[FieldSpec], list[FieldSpec]]:
             purpose=entry.get("purpose", ""),
             min_score=entry.get("min_score"),
             crop_tight=bool(entry.get("crop_tight", True)),
+            enhance=str(entry.get("enhance") or "").lower(),
+            enhance_pct=float(entry.get("enhancePct") or 88.0),
+            loose_clock=bool(entry.get("looseClock", False)),
         )
         if spec.rect and spec.enabled:
             if spec.regex:
@@ -243,6 +249,22 @@ def _clean(text: str) -> str:
         "７": "7", "８": "8", "９": "9", "：": ":", "／": "/", "．": ".", "－": "-",
     })
     return re.sub(r"\s+", " ", str(text or "").translate(table)).strip()
+
+
+def enhance_bright(image: np.ndarray, percentile: float = 88.0) -> np.ndarray:
+    """把亮字从花背景里抠出来。
+
+    HUD 数字压在建筑/天空上时对比度很低（瓦罗兰特顶部分数只有 0.04 置信度），
+    只保留最亮的一成像素后，同样的字能到 0.43。
+    """
+    if image is None or image.size == 0:
+        return image
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    level = float(np.percentile(gray, percentile))
+    if level <= 1:
+        return image
+    _, binary = cv2.threshold(gray, level, 255, cv2.THRESH_BINARY)
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR) if binary.ndim == 2 else binary
 
 
 def parse_value(spec: FieldSpec, text: str):
@@ -283,7 +305,15 @@ def parse_value(spec: FieldSpec, text: str):
             value = int(match.group(1)) * 60 + int(match.group(2))
         else:
             match = BARE_CLOCK_RE.search(cleaned)
-            value = int(match.group(1)) * 60 + int(match.group(2)) if match else None
+            if match:
+                value = int(match.group(1)) * 60 + int(match.group(2))
+            elif spec.loose_clock:
+                # 「1:34」在小图上常被读成「134」，按 M:SS 还原。
+                # 瓦罗兰特回合计时最长 2:59，三位数只可能是 M:SS。
+                digits = re.fullmatch(r"(\d)(\d{2})", cleaned)
+                value = int(digits.group(1)) * 60 + int(digits.group(2)) if digits else None
+            else:
+                value = None
     elif spec.kind == "float":
         match = FLOAT_RE.search(cleaned)
         value = float(match.group(1)) if match else None
@@ -350,6 +380,8 @@ class HudReader:
         for spec in self.specs:
             x, y, w, h = to_pixels(spec.rect, (width, height), origin)
             crop = frame[max(0, y):max(0, y + h), max(0, x):max(0, x + w)]
+            if crop.size and spec.enhance == "bright":
+                crop = enhance_bright(crop, spec.enhance_pct)
             if crop.size and spec.crop_tight:
                 crop = prepare(crop)
             lines = self.engine.read(crop, mode=spec.mode) if crop.size else []
@@ -408,6 +440,47 @@ class HudReader:
 
 
 # -------------------------------------------------------------------- capture
+class SayQueue:
+    """排队「玩家对陪玩说的话」，手机按 id 增量取走。
+
+    PC 端只负责把文字送到；怎么理解、怎么回，是手机端 DeepSeek 的事。
+    这样 PC 端不需要 API Key，也不用知道对话上下文。
+    """
+
+    def __init__(self, keep: int = 50) -> None:
+        self._lock = threading.Lock()
+        self._items: list[dict] = []
+        self._next = 1
+        self._keep = keep
+        # 进程级世代号：PC 重启后手机端据此把游标归零，不会漏掉新消息
+        self.epoch = int(time.time())
+
+    def push(self, text: str, source: str = "pc") -> dict:
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("空文本")
+        with self._lock:
+            item = {"id": self._next, "text": text[:300], "source": source,
+                    "at": round(time.time(), 3)}
+            self._next += 1
+            self._items.append(item)
+            if len(self._items) > self._keep:
+                self._items = self._items[-self._keep:]
+            return item
+
+    def since(self, last_id: int) -> list[dict]:
+        with self._lock:
+            return [item for item in self._items if item["id"] > last_id]
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def latest_id(self) -> int:
+        with self._lock:
+            return self._next - 1
+
+
 class Capture:
     def __init__(self, options: argparse.Namespace) -> None:
         self.options = options
@@ -431,6 +504,7 @@ class Capture:
         self.ocr_result: dict = {"values": {}, "unstable": [], "ms": 0.0, "detail": {}}
         self.ocr_seq = 0
         self.ocr_at = 0.0
+        self.say = SayQueue()
         self._stop = threading.Event()
         self._mss = None
         self._image: np.ndarray | None = None
@@ -579,6 +653,33 @@ a{{color:#7fa0ff;text-decoration:none;word-break:break-all}}span{{color:#7d8cab;
 <ul>{items}</ul></body></html>"""
 
 
+def console_say_reader(say_queue: SayQueue, stop: threading.Event) -> None:
+    """在这个窗口打字回车 -> 文字送到手机，PC 麦克风之外的第二条路。"""
+    try:
+        for line in sys.stdin:
+            if stop.is_set():
+                break
+            text = line.strip()
+            if not text:
+                continue
+            if text in (":q", ":quit", ":exit"):
+                break
+            try:
+                item = say_queue.push(text, "typed")
+            except ValueError:
+                continue
+            print(f"  >> 已送到手机 #{item['id']}：{text}", flush=True)
+    except Exception:
+        pass
+
+
+def _int_arg(raw, default: int = 0) -> int:
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def make_handler(capture: Capture, config: dict):
     ocr_enabled = bool(config.get("_ocr_enabled"))
     calibrated = bool(config.get("calibrated"))
@@ -610,6 +711,33 @@ def make_handler(capture: Capture, config: dict):
         def do_HEAD(self):  # noqa: N802
             self.do_GET()
 
+        def do_POST(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path != "/say":
+                self._json(404, {"error": "not found", "paths": ["/say"]})
+                return
+            length = _int_arg(self.headers.get("content-length") or 0, 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            text = ""
+            source = "pc"
+            if raw:
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                    text = str(data.get("text") or "")
+                    source = str(data.get("source") or "pc")
+                except (ValueError, UnicodeDecodeError):
+                    text = raw.decode("utf-8", "replace")
+            else:
+                query = parse_qs(parsed.query)
+                text = query.get("text", [""])[0]
+                source = query.get("source", ["pc"])[0]
+            try:
+                item = capture.say.push(text, source)
+            except ValueError:
+                self._json(400, {"error": "缺少 text"})
+                return
+            self._json(200, {"ok": True, "id": item["id"], "text": item["text"]})
+
         def do_GET(self):  # noqa: N802
             parsed = urlparse(self.path)
             path = parsed.path
@@ -617,6 +745,12 @@ def make_handler(capture: Capture, config: dict):
 
             if path == "/tick":
                 self._tick(query)
+                return
+            if path == "/say":
+                last = _int_arg(query.get("since", ["0"])[0], 0)
+                self._json(200, {"say": capture.say.since(last),
+                                 "next": capture.say.latest_id(),
+                                 "epoch": capture.say.epoch})
                 return
             if path == "/frame":
                 with capture.lock:
@@ -646,6 +780,8 @@ def make_handler(capture: Capture, config: dict):
                                 "unstable": capture.ocr_result.get("unstable"),
                                 "error": capture.ocr_result.get("error")},
                         "apk": (newest_apk().name if newest_apk() else None),
+                        "say": {"pending": capture.say.pending(),
+                                "lastId": capture.say.latest_id()},
                     }
                 self._json(200, payload)
                 return
@@ -690,11 +826,13 @@ def make_handler(capture: Capture, config: dict):
                 return
             self._json(404, {"error": "not found", "paths": ["/tick", "/frame", "/info",
                                                             "/fields", "/apk", "/apk/info",
-                                                            "/models"]})
+                                                            "/models", "/say"]})
 
         def _tick(self, query: dict) -> None:
             since = query.get("since", [None])[0]
             want_image = query.get("image", ["1"])[0] not in ("0", "false", "no")
+            last_say = _int_arg(query.get("say", ["0"])[0], 0)
+            say_items = capture.say.since(last_say)
             with capture.lock:
                 seq = capture.sequence
                 jpeg, at, size = capture.jpeg, capture.captured_at, capture.sent_size
@@ -703,7 +841,8 @@ def make_handler(capture: Capture, config: dict):
             if since is not None:
                 try:
                     if int(since) == seq:
-                        self._json(200, {"unchanged": True, "seq": seq})
+                        self._json(200, {"unchanged": True, "seq": seq,
+                                         "say": say_items, "sayEpoch": capture.say.epoch})
                         return
                 except ValueError:
                     pass
@@ -715,6 +854,8 @@ def make_handler(capture: Capture, config: dict):
                 "ts": round(at, 3),
                 "profile": profile,
                 "size": list(size),
+                "say": say_items,
+                "sayEpoch": capture.say.epoch,
                 "ocr": {
                     "values": ocr.get("values") or {},
                     "unstable": ocr.get("unstable") or [],
@@ -826,13 +967,25 @@ def main() -> int:
     apk = newest_apk()
     print(f"  APK {apk.name} ({apk.stat().st_size / 1024 / 1024:.1f} MB)" if apk
           else "  APK 尚未生成（dist 目录为空）")
+    print(f"  说话  在这个窗口打字回车 -> 手机的陪玩会回应")
+    print(f"        麦克风说话：另开一个窗口跑 phone\\pc_voice.py（按住 {settings.get('voiceHotkey', 'F2')}）")
     print(f"  配置 {SETTINGS_FILE.name}  按 Ctrl-C 停止")
     print("=" * 58)
+
+    say_stop = threading.Event()
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            threading.Thread(target=console_say_reader, args=(capture.say, say_stop),
+                             name="console-say", daemon=True).start()
+    except Exception:
+        pass
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n收到 Ctrl-C，正在停止…")
     finally:
+        say_stop.set()
         capture.stop()
         server.shutdown()
     return 0

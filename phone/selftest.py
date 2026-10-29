@@ -44,6 +44,16 @@ def get_json(url: str, timeout: float = 10.0):
     return json.loads(get(url, timeout)[1].decode("utf-8"))
 
 
+def post_json(url: str, payload: dict, timeout: float = 10.0):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def wait_ready(base: str, timeout: float = 40.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -153,6 +163,20 @@ def main() -> int:
 
         no_image = get_json(f"{base}/tick?image=0")
         checks["image=0 省流量"] = "image" not in no_image
+
+        # 说话通道：PC 麦克风/控制台 -> /say -> 手机按 id 增量取
+        said = post_json(f"{base}/say", {"text": "这波该往哪走", "source": "voice"})
+        checks["POST /say 收下这句话"] = said.get("ok") is True and said.get("id", 0) > 0
+        say_id = said.get("id", 0)
+        pending = get_json(f"{base}/say?since=0").get("say", [])
+        checks["GET /say 能取到"] = any(item.get("id") == say_id for item in pending)
+        fresh = get_json(f"{base}/tick?image=0&say=0")
+        checks["/tick 带上 say"] = any(item.get("id") == say_id
+                                      for item in fresh.get("say") or [])
+        after = get_json(f"{base}/tick?image=0&say={say_id}")
+        checks["/tick 按 id 增量"] = not any(item.get("id") == say_id
+                                            for item in after.get("say") or [])
+        checks["说话队列有世代号"] = bool(fresh.get("sayEpoch"))
 
         fields = get_json(f"{base}/fields")
         checks["/fields 有配置"] = bool(fields.get("fields"))

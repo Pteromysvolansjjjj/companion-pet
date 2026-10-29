@@ -23,6 +23,9 @@ MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4
 SAMPLE_RATE = 16000
 BLOCK = 1600  # 100 ms
 
+DEFAULT_PROMPT = ("英雄联盟对局语音：上单 打野 中单 下路 辅助 小龙 大龙 团战 补刀 闪现 "
+                  "大招 打野来抓 守塔 推线")
+
 
 def _vk(name: str) -> int | None:
     name = name.strip().upper()
@@ -78,6 +81,7 @@ class VoiceConfig:
     maxMs: int = 15000
     silenceMs: int = 800
     echo: str = "bubble"        # bubble | tray | off
+    prompt: str = ""            # 覆盖默认的 initial_prompt（按游戏换词表）
 
 
 class VoiceService:
@@ -288,7 +292,7 @@ class VoiceService:
                 segments, info = model.transcribe(
                     audio, language=self.config.language or None, beam_size=1,
                     vad_filter=False, condition_on_previous_text=False,
-                    initial_prompt="英雄联盟对局语音：上单 打野 中单 下路 辅助 小龙 大龙 团战 补刀 闪现 大招 打野来抓 守塔 推线",
+                    initial_prompt=self.config.prompt or DEFAULT_PROMPT,
                 )
                 text = "".join(segment.text for segment in segments).strip()
             except Exception as error:
