@@ -59,6 +59,17 @@ class CompanionService : Service() {
     /** 最近说过的话，防复读。 */
     private val recentSpoken = mutableListOf<String>()
 
+    /**
+     * 最近 30 秒的状态变化序列。
+     *
+     * 它的作用是让 DeepSeek **自己**从过程里推断发生了什么，而不是只收本地
+     * 规则判好的结论。比如时间线里「h69 → h0，且 e1l 一直存在」，模型能得
+     * 出「被左边那个人打死的」；只有一句 kind=death 的话它说不出来。
+     *
+     * 只记变化点，10 秒典型 60-80 字节，30 秒 150 字节上下。
+     */
+    private val timeline = Timeline()
+
     /** 多轮对话历史：陪玩要能接上话，不能每句都从零开始。 */
     private val chatHistory = mutableListOf<JSONObject>()
 
@@ -214,6 +225,9 @@ class CompanionService : Service() {
                     lastDetectAt = nowMs
                 }
                 objects += cachedObjects
+
+                // 记一笔状态，供 DeepSeek 后面自己看过程（只存变化点，很便宜）
+                timeline.record(values, objects)
 
                 // 事件要在检测之后才算：死亡时要结合「刚刚看到几个敌人」
                 val events = trackEvents(values, unstable, objects)
@@ -570,7 +584,7 @@ class CompanionService : Service() {
         unstable.forEach { unstableArray.put(it) }
         val eventArray = JSONArray()
         events.forEach { eventArray.put(it) }
-        return JSONObject()
+        val payload = JSONObject()
             .put("game", profile)
             .put("scene", JSONObject().put("objects", scene))
             .put(
@@ -581,6 +595,9 @@ class CompanionService : Service() {
             )
             .put("events", eventArray)
             .put("ask", "此刻你想对他说什么？")
+        val trail = timeline.digest()
+        if (trail.isNotEmpty()) payload.put("trail", trail)
+        return payload
     }
 
     /**
@@ -641,7 +658,11 @@ class CompanionService : Service() {
         val memory = JSONArray()
         matchMemory.takeLast(8).forEach { memory.put(it) }
 
-        return JSONObject()
+        // 最近 30 秒的原始变化序列：让模型自己看过程，而不是只收结论。
+        // 留空时不写这个键，省掉空字符串的 token。
+        val trail = timeline.digest()
+
+        val payload = JSONObject()
             .put("game", profile)
             .put("notes", notes)
             .put("events", eventArray)
@@ -651,6 +672,8 @@ class CompanionService : Service() {
                 "ask", if (died) "他刚被打死了，说句话安慰一下或者给个具体建议"
                 else "此刻你想对他说什么？"
             )
+        if (trail.isNotEmpty()) payload.put("trail", trail)
+        return payload
     }
 
     /** 把数值翻译成「值得说的事」。 */

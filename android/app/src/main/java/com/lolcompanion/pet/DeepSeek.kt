@@ -42,6 +42,9 @@ object DeepSeek {
             "- 你刚说过的话不要重复。同样的意思换个说法，或者干脆闭嘴。\n" +
             "- 最多 2 句，总共不超过 40 个汉字。不要 Markdown，不要表情符号。\n" +
             "- 不要编造没给的信息。没素材的时候可以只说一句闲话。\n" +
+            "如果给了 trail，那是最近 30 秒的状态变化序列，+1.3 是相对秒数。\n" +
+            "h=血量 s=护甲 a=弹药/备弹 e=可见敌人数（l左 c中 r右），h? 是血条读不到。\n" +
+            "自己从这条序列里判断刚才发生了什么，别只念下面那句结论。\n" +
             "玩家被打死的时候：先接住情绪——安慰一句或者给个具体建议，\n" +
             "别只说「你死了」。\n" +
             "下面是好的说法：\n" +
@@ -146,7 +149,12 @@ object DeepSeek {
         if (values.has("allyKills") && values.has("enemyKills")) {
             bits.add("比分${values.optInt("allyKills")}:${values.optInt("enemyKills")}")
         }
-        return if (bits.isEmpty()) "" else "当前：" + bits.joinToString(" ") + "\n"
+        val text = StringBuilder()
+        if (bits.isNotEmpty()) text.append("当前：").append(bits.joinToString(" ")).append('\n')
+        // 玩家问「刚才那波怎么回事」时，这条序列才是能回答问题的东西
+        val trail = payload.optString("trail", "")
+        if (trail.isNotBlank()) text.append("最近：\n").append(trail).append('\n')
+        return text.toString()
     }
 
     fun clean(text: String): String =
