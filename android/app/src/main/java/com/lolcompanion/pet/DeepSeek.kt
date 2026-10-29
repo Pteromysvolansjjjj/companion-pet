@@ -54,13 +54,15 @@ object DeepSeek {
 
     /**
      * @param playerText 玩家刚说的话；非空时当作对话来答，而不是自动播报。
+     * @param history 多轮对话历史（前面的 user/assistant 消息），让陪玩能接上话。
      * @return first = 文本, second = "deepseek" 或 "fallback"。
      */
     fun ask(
         payload: JSONObject,
         apiKey: String,
         model: String,
-        playerText: String? = null
+        playerText: String? = null,
+        history: List<JSONObject> = emptyList()
     ): Pair<String, String> {
         if (apiKey.isBlank()) return fallback(payload) to "fallback"
         var currentModel = model.ifBlank { Prefs.DEFAULT_DS_MODEL }
@@ -74,6 +76,13 @@ object DeepSeek {
         }
         repeat(2) { attempt ->
             try {
+                val messages = JSONArray()
+                messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+                // 历史在前，当前这轮在后——陪玩才能接上话
+                for (item in history) {
+                    messages.put(item)
+                }
+                messages.put(JSONObject().put("role", "user").put("content", content))
                 val body = JSONObject()
                     .put("model", currentModel)
                     .put("stream", false)
@@ -82,11 +91,7 @@ object DeepSeek {
                     // 压一下复读：同一场对话里反复说同一句会很劝退
                     .put("presence_penalty", 0.6)
                     .put("frequency_penalty", 0.4)
-                    .put(
-                        "messages", JSONArray()
-                            .put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
-                            .put(JSONObject().put("role", "user").put("content", content))
-                    )
+                    .put("messages", messages)
                 val request = Request.Builder()
                     .url(URL)
                     .header("authorization", "Bearer $apiKey")

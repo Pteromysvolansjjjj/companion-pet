@@ -47,6 +47,15 @@ class CompanionService : Service() {
     /** 最近说过的话，防复读。 */
     private val recentSpoken = mutableListOf<String>()
 
+    /** 多轮对话历史：陪玩要能接上话，不能每句都从零开始。 */
+    private val chatHistory = mutableListOf<JSONObject>()
+
+    /** 这一局发生过什么（人类可读），每条一句，按时间顺序。 */
+    private val matchMemory = mutableListOf<String>()
+
+    /** 血量 HUD 从「有」变「没有」的时刻，用来判死亡。 */
+    private var hpMissingSince = 0L
+
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
@@ -195,12 +204,15 @@ class CompanionService : Service() {
 
                 if (due) {
                     val payload = broadcastPayload(profile, values, objects, events)
-                    val (text, source) = DeepSeek.ask(payload, prefs.apiKey, prefs.deepseekModel)
+                    val (text, source) = DeepSeek.ask(
+                        payload, prefs.apiKey, prefs.deepseekModel, null, chatHistory
+                    )
                     val lines = DeepSeek.splitLines(text)
                     // 复读保护：跟最近几句太像就不发，宁可不说也别像机器人
                     if (lines.isNotEmpty() && !isRepeat(text)) {
                         PetBus.say(lines, holdMillisFor(text))
                         rememberSpoken(text)
+                        rememberChat(briefAsk(payload), text)
                         lastSpokeAt = System.currentTimeMillis()
                         updateNotification(buildNotification(lines.first(), source))
                     }
@@ -240,6 +252,22 @@ class CompanionService : Service() {
         } catch (error: Throwable) {
             PetBus.status("模型 $profile 加载失败：${error.message ?: error.javaClass.simpleName}")
         }
+    }
+
+    // ------------------------------------------------------------ 记忆
+    /** 往对局记忆里加一条。 */
+    private fun remember(text: String) {
+        if (text.isBlank()) return
+        matchMemory.add(text)
+        while (matchMemory.size > 24) matchMemory.removeAt(0)
+    }
+
+    /** 把这一轮记进对话历史，下次能接上话。 */
+    private fun rememberChat(userContent: String, assistant: String) {
+        if (userContent.isBlank() || assistant.isBlank()) return
+        chatHistory.add(JSONObject().put("role", "user").put("content", userContent))
+        chatHistory.add(JSONObject().put("role", "assistant").put("content", assistant))
+        while (chatHistory.size > 16) chatHistory.removeAt(0)
     }
 
     // ------------------------------------------------------------ 复读保护
@@ -282,14 +310,24 @@ class CompanionService : Service() {
             val payload = buildPayload(
                 profile, lastValues, lastUnstable, lastCalibrated, lastObjects, lastEvents
             ).put("ask", message.text).put("fromPlayer", true)
-            val (text, source) = DeepSeek.ask(payload, prefs.apiKey, prefs.deepseekModel, message.text)
+            val (text, source) = DeepSeek.ask(
+                payload, prefs.apiKey, prefs.deepseekModel, message.text, chatHistory
+            )
             val lines = DeepSeek.splitLines(text)
             val pages = mutableListOf<String>()
             pages.add("你：${message.text}")
             pages.addAll(lines)
             PetBus.say(pages, holdMillisFor(text))
+            rememberChat(message.text, text)
             updateNotification(buildNotification(lines.firstOrNull() ?: "…", source))
         }
+    }
+
+    /** 自动播报时记进对话历史的一句「用户消息」，保持简短，别把整份 payload 存进去。 */
+    private fun briefAsk(payload: JSONObject): String {
+        val notes = payload.optJSONArray("notes")
+        val first = if (notes != null && notes.length() > 0) notes.optString(0) else ""
+        return if (first.isNotBlank()) "现在的局面：$first" else "现在这局还在继续"
     }
 
     // ---------------------------------------------------------------- events
@@ -333,6 +371,7 @@ class CompanionService : Service() {
         }
 
         if (values.has("hp")) {
+            hpMissingSince = 0L
             val arrayNow = values.optJSONArray("hp")
             val arrayBefore = previous["hp"] as? JSONArray
             val now: Int
@@ -362,6 +401,39 @@ class CompanionService : Service() {
                     JSONObject().put("kind", "hurt")
                         .put("from", before).put("to", now)
                 )
+            }
+        } else if (previous.containsKey("hp")) {
+            // 血量 HUD 整块不见了：瓦罗兰特死亡后切到观战视角，自己的血条会直接消失，
+            // 读到的不是 0 而是「读不到」。持续 1.2 秒以上才判死，避免 OCR 偶发漏读。
+            val now = System.currentTimeMillis()
+            if (hpMissingSince == 0L) hpMissingSince = now
+            if (now - hpMissingSince > 1200) {
+                val before = (previous["hp"] as? Int) ?: (previous["hp"] as? JSONArray)?.optInt(0) ?: -1
+                val gap = if (lastEnemyAt > 0) {
+                    Math.round((now - lastEnemyAt) / 1000.0)
+                } else {
+                    -1
+                }
+                events.add(
+                    JSONObject().put("kind", "death")
+                        .put("hpBefore", before)
+                        .put("enemyCount", lastEnemyCount)
+                        .put("secondsSinceEnemy", gap)
+                        .put("spectating", true)
+                )
+                hpMissingSince = 0L
+                // 清掉，避免下一帧又判一次死
+                previous.remove("hp")
+            }
+        }
+
+        // 关键事件写进对局记忆，陪玩后面能引用「你刚才死过一次」这种事
+        for (event in events) {
+            when (event.optString("kind")) {
+                "death" -> remember("你被杀了（当时血量 ${event.optInt("hpBefore")}）")
+                "hurt" -> remember("你挨了一下，${event.optInt("from")} 掉到 ${event.optInt("to")}")
+                "allyKillsChange" -> remember("你们拿下第 ${event.optInt("to")} 个人头")
+                "enemyKillsChange" -> remember("对面拿下第 ${event.optInt("to")} 个人头")
             }
         }
 
@@ -455,11 +527,16 @@ class CompanionService : Service() {
         val recent = JSONArray()
         recentSpoken.forEach { recent.put(it) }
 
+        // 这一局发生过什么
+        val memory = JSONArray()
+        matchMemory.takeLast(8).forEach { memory.put(it) }
+
         return JSONObject()
             .put("game", profile)
             .put("notes", notes)
             .put("events", eventArray)
             .put("recent", recent)
+            .put("memory", memory)
             .put(
                 "ask", if (died) "他刚被打死了，说句话安慰一下或者给个具体建议"
                 else "此刻你想对他说什么？"
@@ -496,7 +573,9 @@ class CompanionService : Service() {
             "right" -> "右边"
             else -> "中路"
         }
-        return "$where有 $count 个$who"
+        // 注意：Kotlin 把中文也当标识符字符，`"$where有"` 会被解析成变量 `where有`，
+        // 所以变量后面紧跟中文时必须写 ${where}。
+        return "${where}有 $count 个$who"
     }
 
     private fun buildStats(
