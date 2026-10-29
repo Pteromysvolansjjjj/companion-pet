@@ -56,6 +56,12 @@ class CompanionService : Service() {
     /** 血量 HUD 从「有」变「没有」的时刻，用来判死亡。 */
     private var hpMissingSince = 0L
 
+    /** 上一次跑 YOLO 的时刻；配合 DETECT_INTERVAL_MS 降频。 */
+    private var lastDetectAt = 0L
+
+    /** 降频期间复用的检测结果。 */
+    private var cachedObjects = emptyList<Triple<String, Int, String>>()
+
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
@@ -137,8 +143,10 @@ class CompanionService : Service() {
                 failures = 0
 
                 // 玩家说话优先回：即使这一帧画面没变也要应答
+                var answeredPlayer = false
                 if (tick.say.isNotEmpty()) {
                     handlePlayerTalk(tick.say, profile)
+                    answeredPlayer = true
                 }
 
                 if (tick.unchanged) {
@@ -161,17 +169,25 @@ class CompanionService : Service() {
 
                 val objects = mutableListOf<Triple<String, Int, String>>()
                 val activeDetector = detector
-                if (activeDetector != null && tick.image != null) {
+                // 检测不必每帧都做：YOLO 一次几十到几百毫秒，5 FPS 全跑会把主循环
+                // 拖到 1.5 FPS，语音消息和气泡跟着一起卡。按时间间隔降频，
+                // 两帧之间复用上一次结果。
+                val nowMs = System.currentTimeMillis()
+                if (activeDetector != null && tick.image != null &&
+                    nowMs - lastDetectAt >= DETECT_INTERVAL_MS
+                ) {
                     try {
                         val bitmap = BitmapFactory.decodeByteArray(tick.image, 0, tick.image.size)
                         if (bitmap != null) {
-                            objects += Detector.summarise(activeDetector.detect(bitmap))
+                            cachedObjects = Detector.summarise(activeDetector.detect(bitmap))
                             bitmap.recycle()
                         }
                     } catch (error: Throwable) {
                         // 单帧推理失败不影响主循环
                     }
+                    lastDetectAt = nowMs
                 }
+                objects += cachedObjects
 
                 // 事件要在检测之后才算：死亡时要结合「刚刚看到几个敌人」
                 val events = trackEvents(values, unstable, objects)
@@ -202,7 +218,7 @@ class CompanionService : Service() {
                     detectSuffix(objects, detector != null))
                 PetBus.stats(buildStats(profile, values, objects))
 
-                if (due) {
+                if (due && !answeredPlayer) {
                     val payload = broadcastPayload(profile, values, objects, events)
                     val (text, source) = DeepSeek.ask(
                         payload, prefs.apiKey, prefs.deepseekModel, null, chatHistory
@@ -716,6 +732,13 @@ class CompanionService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val POLL_MIN_MS = 320L
         private const val POLL_IDLE_MS = 220L
+        /**
+         * 多久跑一次 YOLO。
+         *
+         * 5 FPS 全跑的话，一帧推理几十到几百毫秒，主循环会被拖到 1.5 FPS，
+         * 语音消息和气泡一起卡。陪玩是按秒说话的，1.4 次/秒足够。
+         */
+        private const val DETECT_INTERVAL_MS = 700L
         private const val DEFAULT_PROFILE = "lol"
     }
 }

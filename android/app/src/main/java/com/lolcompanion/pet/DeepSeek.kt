@@ -20,8 +20,9 @@ object DeepSeek {
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        // 6 秒还没回就放弃并给兜底话，别让玩家干等
+        .readTimeout(6, TimeUnit.SECONDS)
         .retryOnConnectionFailure(false)
         .build()
 
@@ -118,7 +119,10 @@ object DeepSeek {
                     if (cleaned.isNotEmpty()) return cleaned to "deepseek"
                 }
             } catch (error: Throwable) {
-                Thread.sleep(300)
+                // 网络类异常直接走兜底，不再重试。
+                // 重试一次意味着玩家要多等一整个 readTimeout（原来最坏 16 秒），
+                // 陪玩场景里「马上说一句」比「憋十几秒说句好的」重要得多。
+                return fallback(payload) to "fallback"
             }
         }
         return fallback(payload) to "fallback"
