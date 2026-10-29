@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass, field as dataclass_field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import cv2
 import numpy as np
@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "vision"))
 
 APK_DIR = Path(__file__).resolve().parent / "dist"
+MODEL_DIR = Path(__file__).resolve().parent / "models"
 
 # Fallback used when fields.yaml is missing or unreadable.  Kept in sync with
 # the four fields that the default HUD really shows.
@@ -500,6 +501,48 @@ def newest_apk() -> Path | None:
     return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
 
+def model_file(name: str) -> Path | None:
+    """只允许 ``phone/models`` 下的一层普通文件，挡掉路径穿越与隐藏文件。"""
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return None
+    candidate = MODEL_DIR / name
+    return candidate if candidate.is_file() else None
+
+
+def model_listing(base: str) -> str:
+    """手机浏览器打开 /models 时的下载页。模型不入库，靠局域网传到手机上。"""
+    if not MODEL_DIR.is_dir():
+        items = ""
+    else:
+        rows = []
+        for path in sorted(MODEL_DIR.iterdir()):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            if path.suffix not in (".tflite", ".txt", ".onnx", ".names"):
+                continue
+            size = path.stat().st_size
+            shown = f"{size / 1024 / 1024:.1f} MB" if size > 1024 * 1024 else f"{size} 字节"
+            rows.append(
+                f'<li><a href="/models/{path.name}">{path.name}</a>'
+                f'<span>{shown}</span></li>'
+            )
+        items = "".join(rows) or "<li>phone/models 下没有可分发的文件</li>"
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>模型下载</title><style>
+body{{background:#0b1220;color:#e9f0ff;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:22px}}
+h1{{font-size:17px;margin:0 0 6px}}p{{color:#8ea6ff;font-size:12px;line-height:1.6;margin:0 0 16px}}
+ul{{list-style:none;padding:0;margin:0}}li{{display:flex;justify-content:space-between;align-items:center;
+background:#101a30;border-radius:12px;padding:14px 16px;margin-bottom:10px;font-size:14px}}
+a{{color:#7fa0ff;text-decoration:none;word-break:break-all}}span{{color:#7d8cab;font-size:12px;white-space:nowrap;margin-left:12px}}
+</style></head><body>
+<h1>模型文件</h1>
+<p>下载后会落在手机的 Download 目录。<br>
+然后在 App 里：设置 → 换模型 → 从文件选择，逐个导入。<br>
+当前地址：{base}</p>
+<ul>{items}</ul></body></html>"""
+
+
 def make_handler(capture: Capture, config: dict):
     ocr_enabled = bool(config.get("_ocr_enabled"))
     calibrated = bool(config.get("calibrated"))
@@ -586,6 +629,20 @@ def make_handler(capture: Capture, config: dict):
                 self._send(200, body, "application/vnd.android.package-archive",
                            {"content-disposition": f'attachment; filename="{apk.name}"'})
                 return
+            if path == "/models":
+                host = self.headers.get("host") or f"{lan_ip()}:{capture.options.port}"
+                body = model_listing(f"http://{host}/models").encode("utf-8")
+                self._send(200, body, "text/html; charset=utf-8")
+                return
+            if path.startswith("/models/"):
+                target = model_file(unquote(path[len("/models/"):]))
+                if target is None:
+                    self._json(404, {"error": "没有这个文件", "hint": f"打开 /models 看清单"})
+                    return
+                body = target.read_bytes()
+                self._send(200, body, "application/octet-stream",
+                           {"content-disposition": f'attachment; filename="{target.name}"'})
+                return
             if path == "/apk/info":
                 apk = newest_apk()
                 if apk is None:
@@ -596,7 +653,8 @@ def make_handler(capture: Capture, config: dict):
                                  "mtime": int(stat.st_mtime)})
                 return
             self._json(404, {"error": "not found", "paths": ["/tick", "/frame", "/info",
-                                                            "/fields", "/apk", "/apk/info"]})
+                                                            "/fields", "/apk", "/apk/info",
+                                                            "/models"]})
 
         def _tick(self, query: dict) -> None:
             since = query.get("since", [None])[0]

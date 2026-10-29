@@ -116,6 +116,20 @@ GET /tick?since=<seq>
 - **Releases** 页下载最新 `lolcompanion-pet-*.apk`（公开仓库，不用登录）
 - 或者服务起了、`phone/dist` 里有 APK 时，手机浏览器直接开 `http://<PC_IP>:8770/apk`
 
+### 传模型到手机
+
+`/Android/data/com.lolcompanion.pet/` 在 Android 11+ **不能**用数据线或普通文件管理器直接写入，
+所以走这两条路：
+
+1. **局域网下载（通用）**：手机浏览器打开 `http://<PC_IP>:8770/models`，点文件名下载，
+   文件落在手机 `Download` 目录；然后在 App 里「设置 → 换模型 → 从文件选择」逐个导入。
+2. **App 内直接下载模型**：「换模型 → 从 URL 下载」，填
+   `http://<PC_IP>:8770/models/valorant.tflite`，直接写进 models 目录
+   （标签文件仍需按第 1 条导入——4 类模型缺标签会被叫成 COCO 的 person/bicycle/car/motorcycle）。
+
+`/models` 只列 `phone/models/` 下的一层文件，路径穿越会被挡成 404。模型本身不入库
+（HF 上那份未标 license，不能再分发），所以只能从本机传。
+
 ### 安装后三步
 
 1. 点右上角 **设置** → 填电脑地址，例如 `192.168.1.10:8770`（不用写 `http://`）

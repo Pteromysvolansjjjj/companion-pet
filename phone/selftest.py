@@ -166,6 +166,12 @@ def main() -> int:
             checks["/apk 有包可下"] = apk.get("bytes", 0) > 1024
         except urllib.error.HTTPError as error:
             checks["/apk 没包回 404"] = error.code == 404
+
+        # 模型靠局域网传到手机，这条端点必须能用
+        page_status, page = get(f"{base}/models")
+        checks["/models 有清单页"] = page_status == 200 and b"<html" in page.lower()
+        label_status, label = get(f"{base}/models/valorant.labels.txt")
+        checks["/models 可下标签"] = label_status == 200 and len(label) > 5
     finally:
         process.terminate()
         try:
