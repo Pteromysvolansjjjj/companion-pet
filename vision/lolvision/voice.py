@@ -312,6 +312,127 @@ class VoiceService:
                        "language": getattr(info, "language", self.config.language)})
 
 
+class AlwaysOnVoice(VoiceService):
+    """全程录音版：不用按键，一说话就录，静下来自动断句。
+
+    与按热键版的区别只在采集侧：这里没有热键线程，麦克风一直开着，
+    用能量 VAD 判断「有人在说话」：
+
+        噪声底 noise 用 EMA 跟踪，门限 gate = max(floor, noise * factor)
+        静音 idle 时：noise <- 0.97 * noise + 0.03 * rms
+        连续超过门限 -> 起音，开始缓冲
+        静音超过 silenceMs -> 断句，丢给 Whisper
+
+    识别与转写完全复用父类，所以模型、词表、延迟行为都一样。
+    """
+
+    def __init__(self, config: VoiceConfig, emit, log=None) -> None:
+        super().__init__(config, emit, log)
+        self.floor = 0.010        # 绝对音量下限，麦克风增益低时靠它兜底
+        self.factor = 2.6         # 相对噪声底的倍数
+        self.min_chars = 1        # 识别结果少于此字数就丢弃
+        self.state = "listening"
+
+    # ------------------------------------------------------------- lifecycle
+    def start(self) -> dict:
+        if not self.config.enabled:
+            return {"enabled": False}
+        self._stop.clear()
+        self._transcribe_thread = threading.Thread(target=self._transcribe_loop,
+                                                   name="voice-stt", daemon=True)
+        self._transcribe_thread.start()
+        threading.Thread(target=self._preload, name="voice-preload", daemon=True).start()
+        if not self._open_stream():
+            return {"enabled": False, "error": "microphone_unavailable"}
+        self._set_state("listening")
+        return {"enabled": True, "mode": "always", "model": self.config.model}
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._recording = False
+        self._close_stream()
+        self.state = "idle"
+        self.emit({"type": "voice:state", "state": "idle"})
+
+    # ----------------------------------------------------------------- state
+    def _set_state(self, state: str) -> None:
+        # 常开模式没有「空闲」，空闲就是「在听」
+        if state == "idle":
+            state = "listening"
+        super()._set_state(state)
+
+    def status(self) -> dict:
+        data = super().status()
+        data["mode"] = "always"
+        data["noise"] = round(self._noise, 5)
+        data["gate"] = round(max(self.floor, self._noise * self.factor), 5)
+        return data
+
+    # -------------------------------------------------------------- capture
+    def _on_audio(self, indata, _frames, _time_info, _status) -> None:
+        block = indata[:, 0].copy()
+        rms = float(np.sqrt(np.mean(block ** 2)))
+        now = time.monotonic()
+        gate = max(self.floor, self._noise * self.factor)
+
+        if not self._recording:
+            # 空闲时只跟踪噪声底
+            self._noise = 0.97 * self._noise + 0.03 * rms
+            if rms >= gate:
+                self._begin(now)
+                self._buffers.append(block)
+            return
+
+        self._buffers.append(block)
+        if rms >= gate:
+            self._last_voice_at = now
+        elif (now - self._last_voice_at) * 1000 >= self.config.silenceMs:
+            self._finish("silence")
+            return
+        if (now - self._record_started) * 1000 >= self.config.maxMs:
+            self._finish("max")
+
+    def _begin(self, now: float) -> None:
+        self._recording = True
+        self._buffers = []
+        self._record_started = now
+        self._last_voice_at = now
+        self._set_state("recording")
+        self.emit({"type": "voice:state", "state": "recording",
+                   "startedAt": int(time.time() * 1000)})
+
+    def _finish(self, reason: str) -> None:
+        if not self._recording:
+            return
+        self._recording = False
+        buffers, self._buffers = self._buffers, []
+        audio = np.concatenate(buffers) if buffers else np.zeros(0, dtype=np.float32)
+        # 判定长短要用「有声段净时长」：trim_silence 会在尾部补 12 帧静音，
+        # 0.2 秒的咔哒声裁完能到 0.3 秒，混进完整句子里根本分不出来。
+        speech_ms = self._speech_ms(audio)
+        if speech_ms < self.config.minMs:
+            self._set_state("listening")
+            return
+        # 送去识别前先裁掉首尾静音，Whisper 更准
+        audio = trim_silence(audio, SAMPLE_RATE)
+        duration_ms = int(len(audio) / SAMPLE_RATE * 1000)
+        self._set_state("transcribing")
+        self._job.put((audio, duration_ms, reason))
+
+    def _speech_ms(self, audio: np.ndarray) -> int:
+        """这段音频里真正有声的毫秒数。"""
+        if audio.size == 0:
+            return 0
+        frame = max(1, int(SAMPLE_RATE * 0.02))
+        usable = audio[: audio.size - audio.size % frame]
+        if usable.size == 0:
+            return 0
+        energy = np.sqrt(np.mean(usable.reshape(-1, frame) ** 2, axis=1))
+        gate = max(self.floor * 0.6, float(np.max(energy)) * 0.25)
+        voiced = int(np.count_nonzero(energy > gate))
+        return int(voiced * frame / SAMPLE_RATE * 1000)
+
+
 def trim_silence(audio: np.ndarray, rate: int, threshold: float = 0.006) -> np.ndarray:
     if audio.size == 0:
         return audio

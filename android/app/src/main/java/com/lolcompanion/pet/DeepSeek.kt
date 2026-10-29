@@ -47,7 +47,10 @@ object DeepSeek {
         val content = if (playerText.isNullOrBlank()) {
             payload.toString()
         } else {
-            payload.toString() + "\n\n玩家刚说：「" + playerText + "」——直接回应这句话。"
+            // 玩家提问：只发「一行简况 + 他说的话」。
+            // 完整 payload 里有 HUD 全量、检测明细、事件列表，提问时根本用不上，
+            // 发过去只是白烧 token。
+            briefContext(payload) + "玩家说：" + playerText
         }
         repeat(2) { attempt ->
             try {
@@ -91,6 +94,27 @@ object DeepSeek {
             }
         }
         return fallback(payload) to "fallback"
+    }
+
+    /**
+     * 一行战况简况，用来给「玩家提问」这条路径当上下文。
+     * 空的话返回空串——只发玩家说的话也够模型回答了。
+     */
+    private fun briefContext(payload: JSONObject): String {
+        val values = payload.optJSONObject("hud")?.optJSONObject("values") ?: JSONObject()
+        val bits = mutableListOf<String>()
+        if (values.has("hp")) bits.add("血量${values.optInt("hp")}")
+        if (values.has("shield")) bits.add("护甲${values.optInt("shield")}")
+        if (values.has("ammo")) bits.add("弹药${values.optInt("ammo")}")
+        if (values.has("ammoReserve")) bits.add("备弹${values.optInt("ammoReserve")}")
+        if (values.has("timer")) {
+            val timer = values.optInt("timer", 0)
+            bits.add("计时%d:%02d".format(timer / 60, timer % 60))
+        }
+        if (values.has("allyKills") && values.has("enemyKills")) {
+            bits.add("比分${values.optInt("allyKills")}:${values.optInt("enemyKills")}")
+        }
+        return if (bits.isEmpty()) "" else "当前：" + bits.joinToString(" ") + "\n"
     }
 
     fun clean(text: String): String =

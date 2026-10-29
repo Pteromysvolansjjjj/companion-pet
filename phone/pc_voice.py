@@ -82,8 +82,17 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8770, help="PC 采集服务的端口")
     parser.add_argument("--hotkey", default="F2", help="按住说话的热键，如 F2 / Ctrl+Alt+F2")
-    parser.add_argument("--mode", choices=["push", "toggle"], default="push",
-                        help="push=按住说话；toggle=按一下开始，再按一下停")
+    parser.add_argument("--mode", choices=["always", "push", "toggle"], default="always",
+                        help="always=全程录音，一说话就录（默认）；push=按住热键说话；"
+                             "toggle=按一下开始、再按一下停")
+    parser.add_argument("--floor", type=float, default=0.010,
+                        help="always 模式的音量下限，调大可以少被游戏音效触发")
+    parser.add_argument("--factor", type=float, default=2.6,
+                        help="always 模式相对噪声底的倍数，调大更不容易误触发")
+    parser.add_argument("--min-chars", type=int, default=2,
+                        help="识别结果少于此字数就丢弃")
+    parser.add_argument("--silence-ms", type=int, default=800,
+                        help="静音多久算一句话说完")
     parser.add_argument("--model", default=str(DEFAULT_MODEL), help="faster-whisper 模型目录")
     parser.add_argument("--language", default="zh")
     parser.add_argument("--device", type=int, default=None, help="麦克风设备序号")
@@ -91,7 +100,7 @@ def main() -> int:
     parser.add_argument("--wav", default="", help="离线转写一个 wav 就退出（自测用）")
     args = parser.parse_args()
 
-    from lolvision.voice import VoiceConfig, VoiceService, list_devices
+    from lolvision.voice import AlwaysOnVoice, VoiceConfig, VoiceService, list_devices
 
     if args.list_devices:
         devices = list_devices()
@@ -136,6 +145,9 @@ def main() -> int:
         language=args.language,
         device=args.device,
         prompt=FPS_PROMPT,
+        silenceMs=args.silence_ms,
+        minMs=400,
+        maxMs=12000,
     )
 
     pending: list[str] = []
@@ -156,6 +168,9 @@ def main() -> int:
             return
         text = (event.get("text") or "").strip()
         latency = event.get("latencyMs")
+        if len(text) < max(1, args.min_chars):
+            print(f"  （太短，丢弃：{text!r}）", flush=True)
+            return
         if not text:
             print("  （没听清）", flush=True)
             return
@@ -176,19 +191,39 @@ def main() -> int:
                 print(f"  -> 发送失败：{error}", flush=True)
                 return
 
-    service = VoiceService(config, emit)
+    if args.mode == "always":
+        service = AlwaysOnVoice(config, emit)
+        service.floor = args.floor
+        service.factor = args.factor
+    else:
+        service = VoiceService(config, emit)
     status = service.start()
 
     print("=" * 58)
     print("  PC 麦克风 -> 手机陪玩")
     print("=" * 58)
-    print(f"  热键 {args.hotkey}（{'按住说话' if args.mode == 'push' else '按一下开始/再按一下停'}）")
+    if args.mode == "always":
+        print("  模式 全程录音：一说话就录，静下来自动断句，不用按任何键")
+        print(f"       音量下限 {args.floor}  噪声倍数 {args.factor}  "
+              f"静音断句 {args.silence_ms}ms")
+    else:
+        print(f"  热键 {args.hotkey}（{'按住说话' if args.mode == 'push' else '按一下开始/再按一下停'}）")
     print(f"  模型 {model_path.name}  本地 CPU 识别，不上传音频")
     print(f"  目标 {base}/say")
     if status.get("error"):
-        print(f"  [注意] {status['error']}：热键可能已被别的程序占用，换 --hotkey 试试")
+        if args.mode == "always":
+            print(f"  [注意] {status['error']}：麦克风打不开，检查系统录音权限")
+        else:
+            print(f"  [注意] {status['error']}：热键可能已被别的程序占用，换 --hotkey 试试")
     print("  按 Ctrl-C 退出")
     print("=" * 58)
+
+    if args.mode == "always":
+        # 打印一次噪声底，方便用户判断灵敏度
+        time.sleep(2.0)
+        info = service.status()
+        print(f"  当前噪声底 {info.get('noise')}  触发门限 {info.get('gate')}"
+              f"（嫌太灵敏就调大 --floor）", flush=True)
 
     try:
         while True:

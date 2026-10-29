@@ -505,6 +505,9 @@ class Capture:
         self.ocr_seq = 0
         self.ocr_at = 0.0
         self.say = SayQueue()
+        # 请求计数：手机只有加载了模型才会要「带图」，这两个数字能反证手机端在推理
+        self.image_requests = 0
+        self.plain_requests = 0
         self._stop = threading.Event()
         self._mss = None
         self._image: np.ndarray | None = None
@@ -782,6 +785,8 @@ def make_handler(capture: Capture, config: dict):
                         "apk": (newest_apk().name if newest_apk() else None),
                         "say": {"pending": capture.say.pending(),
                                 "lastId": capture.say.latest_id()},
+                        "requests": {"image": capture.image_requests,
+                                     "plain": capture.plain_requests},
                     }
                 self._json(200, payload)
                 return
@@ -833,6 +838,10 @@ def make_handler(capture: Capture, config: dict):
             want_image = query.get("image", ["1"])[0] not in ("0", "false", "no")
             last_say = _int_arg(query.get("say", ["0"])[0], 0)
             say_items = capture.say.since(last_say)
+            if want_image:
+                capture.image_requests += 1
+            else:
+                capture.plain_requests += 1
             with capture.lock:
                 seq = capture.sequence
                 jpeg, at, size = capture.jpeg, capture.captured_at, capture.sent_size

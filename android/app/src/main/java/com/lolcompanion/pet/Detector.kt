@@ -33,12 +33,23 @@ data class Detection(
 class Detector(
     modelFile: File,
     private val labels: List<String>,
-    // 实测瓦罗兰特的 enemy 类置信度只有 0.35，0.35 的阈值会卡在边缘漏检；
-    // 陪玩只需要「有没有人」，误报的代价远小于漏报，所以收到 0.30。
+    // 实测瓦罗兰特模型的 enemy 类置信度只有 0.26-0.29（640 宽下发的真实对局帧），
+    // 统一用 0.30 会把敌人整个滤掉，所以人形类单独放宽，见 thresholdFor。
     private val conf: Float = 0.30f,
     private val iou: Float = 0.45f,
     threads: Int = 4
 ) : Closeable {
+
+    /**
+     * 按类别给阈值。
+     *
+     * 陪玩只需要「画面里有没有人」，漏报的代价远大于误报，所以 enemy/teammate 放宽到
+     * 0.15；spike 是小图标，低置信度容易把道具认成人形，保持严格。
+     */
+    private fun thresholdFor(label: String): Float = when (label.trim().lowercase()) {
+        "enemy", "teammate" -> min(conf, 0.15f)
+        else -> conf
+    }
 
     private val interpreter: Interpreter
     private var gpuDelegate: GpuDelegate? = null
@@ -163,13 +174,15 @@ class Detector(
                 }
             }
             if (bestClass < 0 || bestScore < conf) continue
+            val label = if (bestClass < labels.size) labels[bestClass] else bestClass.toString()
+            if (bestScore < thresholdFor(label)) continue
             val cx = coordAt(0, anchor)
             val cy = coordAt(1, anchor)
             val width = coordAt(2, anchor)
             val height = coordAt(3, anchor)
             candidates.add(
                 Candidate(
-                    label = if (bestClass < labels.size) labels[bestClass] else bestClass.toString(),
+                    label = label,
                     score = bestScore,
                     x = cx - width / 2f,
                     y = cy - height / 2f,

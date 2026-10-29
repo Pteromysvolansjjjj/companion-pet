@@ -173,8 +173,9 @@ class CompanionService : Service() {
                     continue
                 }
 
-                PetBus.status("已连接 · ${tick.ocrMs.toInt()}ms")
-                PetBus.stats(buildStats(profile, values))
+                PetBus.status("已连接 · ${tick.ocrMs.toInt()}ms" +
+                    detectSuffix(objects, detector != null))
+                PetBus.stats(buildStats(profile, values, objects))
 
                 if (due) {
                     val payload = buildPayload(profile, values, unstable, tick.calibrated, objects, events)
@@ -315,7 +316,11 @@ class CompanionService : Service() {
             .put("ask", "看一眼现在该干嘛，一句话。")
     }
 
-    private fun buildStats(profile: String, values: JSONObject): String {
+    private fun buildStats(
+        profile: String,
+        values: JSONObject,
+        objects: List<Triple<String, Int, String>>
+    ): String {
         val bits = mutableListOf<String>()
         if (profile.isNotBlank() && profile != Prefs.PROFILE_NONE) bits.add(profile)
         if (values.has("timer")) {
@@ -326,7 +331,33 @@ class CompanionService : Service() {
             bits.add("${values.optInt("allyKills")}:${values.optInt("enemyKills")}")
         }
         if (values.has("level")) bits.add("${values.optInt("level")} 级")
+        val detected = detectSuffix(objects, true).removePrefix(" · ")
+        if (detected.isNotEmpty() && detected != "未检出目标") bits.add(detected)
         return bits.joinToString(" · ")
+    }
+
+    /**
+     * 检测摘要，挂在状态行后面：「敌×2 友×1」。
+     *
+     * 没有模型时明确写「仅对话」，否则「没检出敌人」和「根本没在检测」分不清——
+     * 这两种情况在手机上看起来一模一样。
+     */
+    private fun detectSuffix(
+        objects: List<Triple<String, Int, String>>,
+        hasDetector: Boolean
+    ): String {
+        if (!hasDetector) return " · 仅对话（无模型）"
+        if (objects.isEmpty()) return " · 未检出目标"
+        val text = objects.joinToString(" ") { (label, count, _) ->
+            val short = when (label.trim().lowercase()) {
+                "enemy" -> "敌"
+                "teammate" -> "友"
+                "dropped spike", "planted spike" -> "包"
+                else -> label
+            }
+            "$short×$count"
+        }
+        return " · $text"
     }
 
     private fun holdMillisFor(text: String): Long =
