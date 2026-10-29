@@ -44,6 +44,12 @@ class CompanionService : Service() {
     private var lastEnemyAt = 0L
     private var lastEnemyCount = 0
 
+    /** 上一帧的敌人数量，用来判断「新出现」。 */
+    private var previousEnemyCount = 0
+
+    /** 上一次「发现敌人」事件的时刻，用于刷屏冷却。 */
+    private var lastEnemyEventAt = 0L
+
     /** 最近说过的话，防复读。 */
     private val recentSpoken = mutableListOf<String>()
 
@@ -173,11 +179,22 @@ class CompanionService : Service() {
                 val objects = mutableListOf<Triple<String, Int, String>>()
                 val activeDetector = detector
                 // 检测不必每帧都做：YOLO 一次几十到几百毫秒，5 FPS 全跑会把主循环
-                // 拖到 1.5 FPS，语音消息和气泡跟着一起卡。按时间间隔降频，
-                // 两帧之间复用上一次结果。
+                // 拖到 1.5 FPS，语音消息和气泡跟着一起卡。
+                //
+                // 间隔按实测推理耗时自适应（目标约占一个核的 15%）：
+                //   GPU 20ms  -> 200ms 一次（5 次/秒），敌人一出现就能看到
+                //   CPU 107ms -> 535ms 一次
+                //   CPU 300ms -> 1000ms 一次（上限，别把手机烤了）
                 val nowMs = System.currentTimeMillis()
+                val detectGap = activeDetector?.let { det ->
+                    if (det.lastDetectMs > 1.0) {
+                        (det.lastDetectMs * 5).toLong().coerceIn(200L, 1000L)
+                    } else {
+                        DETECT_INTERVAL_MS
+                    }
+                } ?: DETECT_INTERVAL_MS
                 if (activeDetector != null && tick.image != null &&
-                    nowMs - lastDetectAt >= DETECT_INTERVAL_MS
+                    nowMs - lastDetectAt >= detectGap
                 ) {
                     try {
                         val bitmap = BitmapFactory.decodeByteArray(tick.image, 0, tick.image.size)
@@ -207,7 +224,8 @@ class CompanionService : Service() {
                 val notable = events.any {
                     val kind = it.optString("kind")
                     kind == "death" || kind == "hurt" ||
-                        kind == "allyKillsChange" || kind == "enemyKillsChange"
+                        kind == "allyKillsChange" || kind == "enemyKillsChange" ||
+                        kind == "enemySpotted"
                 }
                 val due = notable ||
                     System.currentTimeMillis() - lastSpokeAt >= prefs.intervalSec * 1000L
@@ -379,10 +397,25 @@ class CompanionService : Service() {
 
         // 看到敌人就记一笔：等会儿玩家死了，才知道说得出「刚才那波是被打了」
         val enemies = objects.filter { it.first.equals("enemy", ignoreCase = true) }
-        if (enemies.isNotEmpty()) {
-            lastEnemyAt = System.currentTimeMillis()
-            lastEnemyCount = enemies.sumOf { it.second }
+        val enemyNow = enemies.sumOf { it.second }
+        val nowMs = System.currentTimeMillis()
+        if (enemyNow > 0) {
+            lastEnemyAt = nowMs
+            lastEnemyCount = enemyNow
         }
+        // 敌人「新出现」或变多——这是陪玩最该马上开口的时刻。
+        // 之前检测结果完全不触发播报，只能等 intervalSec（默认 30 秒）那次，
+        // 等于看到人也不吭声。加 4 秒冷却，避免同一波人进出把头刷屏。
+        if (enemyNow > previousEnemyCount && nowMs - lastEnemyEventAt >= 4_000) {
+            events.add(
+                JSONObject().put("kind", "enemySpotted")
+                    .put("count", enemyNow)
+                    .put("was", previousEnemyCount)
+                    .put("region", enemies.firstOrNull()?.third ?: "center")
+            )
+            lastEnemyEventAt = nowMs
+        }
+        previousEnemyCount = enemyNow
 
         if (values.has("timer")) {
             val timer = values.optInt("timer", -1)
@@ -553,6 +586,11 @@ class CompanionService : Service() {
                 "hurt" -> notes.put(
                     "你挨了一下，血量从 ${event.optInt("from")} 掉到 ${event.optInt("to")}"
                 )
+                "enemySpotted" -> {
+                    val count = event.optInt("count", 1)
+                    val region = event.optString("region", "center")
+                    notes.put(sceneSentence("enemy", count, region) + "，刚露头")
+                }
             }
         }
 
@@ -626,11 +664,17 @@ class CompanionService : Service() {
             bits.add("${values.optInt("allyKills")}:${values.optInt("enemyKills")}")
         }
         if (values.has("level")) bits.add("${values.optInt("level")} 级")
+        val activeDet = detector
         val detected = detectSuffix(
             objects, true,
-            detector?.lastDetectMs ?: 0.0, detector?.usingGpu == true
+            activeDet?.lastDetectMs ?: 0.0, activeDet?.usingGpu == true
         ).removePrefix(" · ")
         if (detected.isNotEmpty() && detected != "未检出目标") bits.add(detected)
+        // 实际检测频率：自适应之后到底跑多快，直接摆在界面上
+        if (activeDet != null && activeDet.lastDetectMs > 1.0) {
+            val gap = (activeDet.lastDetectMs * 5).toLong().coerceIn(200L, 1000L)
+            bits.add("%.1f 次/秒".format(1000.0 / gap))
+        }
         return bits.joinToString(" · ")
     }
 
@@ -756,10 +800,11 @@ class CompanionService : Service() {
         private const val POLL_MIN_MS = 320L
         private const val POLL_IDLE_MS = 220L
         /**
-         * 多久跑一次 YOLO。
+         * YOLO 检测间隔的兜底值。
          *
-         * 5 FPS 全跑的话，一帧推理几十到几百毫秒，主循环会被拖到 1.5 FPS，
-         * 语音消息和气泡一起卡。陪玩是按秒说话的，1.4 次/秒足够。
+         * 实际间隔会按测量到的推理耗时自适应（见 detectGap 的计算）：
+         * GPU 快就多跑几次，CPU 慢就少跑几次，始终保持约 15% 单核占用。
+         * 这个常量只在还没测出耗时（第一次检测之前）时用。
          */
         private const val DETECT_INTERVAL_MS = 700L
         private const val DEFAULT_PROFILE = "lol"

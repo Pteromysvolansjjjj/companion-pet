@@ -184,6 +184,7 @@ object DeepSeek {
             when (event.optString("kind")) {
                 "death" -> return "这波没了，别急，想好再出去。"
                 "hurt" -> return "你挨了一下，先拉开距离。"
+                "enemySpotted" -> return "有人，注意点。"
                 "allyKillsChange" -> return "拿下一个，节奏来了。"
                 "enemyKillsChange" -> return "对面又拿一个，稳一点。"
             }
