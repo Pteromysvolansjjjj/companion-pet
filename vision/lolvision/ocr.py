@@ -14,11 +14,36 @@ through a per-call flag, so two engines are kept and reused.
 
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+
+def _alias_frozen_submodules() -> None:
+    """让 RapidOCR 在 PyInstaller 冻结后仍能动态导入识别器。
+
+    RapidOCR 的 ``rapid_ocr_api.init_module`` 用的是
+    ``importlib.import_module("ch_ppocr_v3_rec")``——注意是**顶层名字**，不是
+    ``rapidocr_onnxruntime.ch_ppocr_v3_rec``。源码安装时它能成，是因为安装过程把包目录
+    放进了 ``sys.path``；冻结成 exe 后这个副作用不存在，PyInstaller 只会返回一个空占位
+    模块，于是报 ``module 'ch_ppocr_v3_rec' has no attribute 'TextRecognizer'``。
+
+    这里把三个子包显式注册成顶层名字（打包时用 ``--collect-submodules`` 保证它们在包里）。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    import importlib
+
+    for name in ("ch_ppocr_v3_det", "ch_ppocr_v3_rec", "ch_ppocr_v2_cls"):
+        if name in sys.modules:
+            continue
+        try:
+            sys.modules[name] = importlib.import_module(f"rapidocr_onnxruntime.{name}")
+        except Exception:  # noqa: BLE001 - 装不全时让后面的真实报错暴露出来
+            pass
 
 
 @dataclass
@@ -48,6 +73,7 @@ class OcrEngine:
         with self._lock:
             from rapidocr_onnxruntime import RapidOCR
 
+            _alias_frozen_submodules()
             if self._line is None:
                 self._line = RapidOCR(use_text_det=False, use_angle_cls=False,
                                       intra_op_num_threads=self.threads)

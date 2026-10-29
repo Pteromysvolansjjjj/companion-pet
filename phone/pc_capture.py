@@ -38,11 +38,46 @@ import cv2
 import numpy as np
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
+# 输出被重定向到文件或管道时用 UTF-8，日志才读得出中文；
+# 直接开控制台时保持系统默认编码，避免 Windows 控制台乱码。
+if not sys.stdout.isatty():
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            # line_buffering：重定向到文件时不加这个，横幅会卡在缓冲区里看不到
+            _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
+def app_dir() -> Path:
+    """配置、模型、APK 所在的目录。
+
+    源码运行时是 ``phone/``；被 PyInstaller 冻结成 exe 后是 **exe 所在目录**
+    （``__file__`` 那会儿指向临时解包目录，不能用来找配置）。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = app_dir()
+ROOT = APP_DIR.parent if not getattr(sys, "frozen", False) else APP_DIR
 sys.path.insert(0, str(ROOT / "vision"))
 
-APK_DIR = Path(__file__).resolve().parent / "dist"
-MODEL_DIR = Path(__file__).resolve().parent / "models"
+APK_DIR = APP_DIR / "dist"
+MODEL_DIR = APP_DIR / "models"
+PROFILE_DIR = APP_DIR / "profiles"
+SETTINGS_FILE = APP_DIR / "pet.json"
+
+DEFAULT_SETTINGS = {
+    "_说明": "改完保存，重新打开 exe 生效。profile 可选 lol / valorant / delta，留空按 lol。",
+    "profile": "lol",
+    "port": 8770,
+    "fps": 5,
+    "width": 640,
+    "quality": 70,
+    "windowTitle": "",
+}
 
 # Fallback used when fields.yaml is missing or unreadable.  Kept in sync with
 # the four fields that the default HUD really shows.
@@ -403,7 +438,8 @@ class Capture:
             image_path = Path(options.image or "")
             self._image = cv2.imread(str(image_path))
             if self._image is None:
-                raise SystemExit(f"读不到图片: {image_path}")
+                raise SystemExit(f"读不到图片: {image_path or '(未指定)'}；"
+                                 f"--source image 必须配 --image <路径>")
 
     def _region(self):
         if self.window_title and self._mss is not None:
@@ -696,30 +732,66 @@ def make_handler(capture: Capture, config: dict):
     return Handler
 
 
+def load_settings() -> dict:
+    """读 exe 旁边的 pet.json。
+
+    只对冻结后的 exe 生效：源码运行时保持纯命令行行为，否则本机这份配置会把
+    自检和 `--fields` 的预期全带偏（踩过一次：pet.json 里 profile=valorant，
+    导致自检里 LoL 字段的 5 项全挂）。
+    """
+    if not getattr(sys, "frozen", False):
+        return {}
+    data = dict(DEFAULT_SETTINGS)
+    if SETTINGS_FILE.exists():
+        try:
+            user = json.loads(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
+            data.update({key: value for key, value in user.items()
+                         if key in DEFAULT_SETTINGS and not key.startswith("_")})
+        except Exception as error:  # noqa: BLE001
+            print(f"[warn] pet.json 解析失败，用默认值: {error}")
+    else:
+        try:
+            SETTINGS_FILE.write_text(
+                json.dumps(DEFAULT_SETTINGS, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"[init] 已生成 {SETTINGS_FILE.name}，改 profile 可切游戏档位")
+        except OSError:
+            pass
+    return data
+
+
 def main() -> int:
+    settings = load_settings()
+
+    def setting(key: str):
+        return settings.get(key, DEFAULT_SETTINGS[key])
+
     parser = argparse.ArgumentParser(description="PC 采集 + HUD OCR + /tick 服务")
-    parser.add_argument("--port", type=int, default=8770)
+    parser.add_argument("--port", type=int, default=int(setting("port")))
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--fps", type=float, default=5.0)
-    parser.add_argument("--width", type=int, default=640, help="下发画面的宽度，0 表示原始尺寸")
-    parser.add_argument("--quality", type=int, default=70)
+    parser.add_argument("--fps", type=float, default=float(setting("fps")))
+    parser.add_argument("--width", type=int, default=int(setting("width")),
+                        help="下发画面的宽度，0 表示原始尺寸")
+    parser.add_argument("--quality", type=int, default=int(setting("quality")))
     parser.add_argument("--monitor", type=int, default=1)
-    parser.add_argument("--window-title", default="", help="只截标题包含该关键字的窗口")
+    parser.add_argument("--window-title", default=str(setting("windowTitle")),
+                        help="只截标题包含该关键字的窗口")
     parser.add_argument("--source", choices=["screen", "image"], default="screen")
-    parser.add_argument("--image", default=str(ROOT / "vision" / "samples" / "synthetic-hud.png"))
-    parser.add_argument("--fields", default=str(Path(__file__).resolve().parent / "fields.yaml"))
-    parser.add_argument("--profile", default="",
-                        help="游戏档位名，读取 phone/profiles/<name>.yaml；省略则用 --fields")
+    parser.add_argument("--image", default="",
+                        help="配合 --source image 使用的静态图路径（仅自测用）")
+    parser.add_argument("--fields", default=str(APP_DIR / "fields.yaml"))
+    parser.add_argument("--profile", default=str(setting("profile") or ""),
+                        help="游戏档位名，读取 profiles/<name>.yaml；省略则用 --fields")
     parser.add_argument("--no-ocr", action="store_true", help="只发画面，不跑 OCR")
     args = parser.parse_args()
 
     fields_path = Path(args.fields)
     if args.profile:
-        candidate = Path(__file__).resolve().parent / "profiles" / f"{args.profile.lower()}.yaml"
+        candidate = PROFILE_DIR / f"{args.profile.lower()}.yaml"
         if candidate.exists():
             fields_path = candidate
-        else:
-            print(f"[warn] 没有 {candidate}，回退到 {fields_path.name}")
+        elif args.profile.lower() not in ("lol",):
+            # lol 的配置本来就是 fields.yaml，不该按「回退」报警
+            print(f"[warn] 没有 {candidate.name}，回退到 {fields_path.name}")
     config = load_config(fields_path)
     config["_profile"] = args.profile.lower() if args.profile else ""
     config["_ocr_enabled"] = not args.no_ocr
@@ -738,17 +810,24 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(capture, config))
     base = f"http://{lan_ip()}:{args.port}"
-    print("PC 采集已启动")
-    print(f"  /tick   {base}/tick        <- 手机拉这个")
-    print(f"  /info   {base}/info")
-    print(f"  /apk    {base}/apk")
+    print("=" * 58)
+    print("  陪玩桌宠 · PC 采集服务已启动")
+    print("=" * 58)
+    print(f"  手机填这个地址：{lan_ip()}:{args.port}")
+    print(f"  /tick    {base}/tick      <- 手机自动拉")
+    print(f"  /models  {base}/models    <- 手机下模型")
+    print(f"  /apk     {base}/apk       <- 手机下 APK")
+    print(f"  /info    {base}/info")
+    print("-" * 58)
     print(f"  画面 {args.width or '原生'} 宽, {args.fps:g} FPS, JPEG q{args.quality}, 源 {args.source}")
     print(f"  档位 {str(config.get('profile') or args.profile or 'lol').lower()}"
           f"  字段 {[spec.name for spec in specs]} 派生 {[spec.name for spec in derived]}"
           f" calibrated={bool(config.get('calibrated'))}")
     apk = newest_apk()
     print(f"  APK {apk.name} ({apk.stat().st_size / 1024 / 1024:.1f} MB)" if apk
-          else "  APK 尚未生成（phone/dist 为空）")
+          else "  APK 尚未生成（dist 目录为空）")
+    print(f"  配置 {SETTINGS_FILE.name}  按 Ctrl-C 停止")
+    print("=" * 58)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -760,4 +839,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001 - 双击启动时窗口会一闪而过，必须停住给人看
+        import traceback
+
+        traceback.print_exc()
+        exit_code = 1
+    if exit_code and getattr(sys, "frozen", False):
+        try:
+            input("\n出错了，按回车关闭窗口…")
+        except EOFError:
+            pass
+    raise SystemExit(exit_code)

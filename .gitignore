@@ -35,3 +35,8 @@ node_modules/
 /phone/models/*.pt
 /phone/models/*_saved_model/
 /phone/calibration/
+
+# 打包产物与本地配置（exe 约 96MB，不该入库）
+/phone/LolCompanionPet.exe
+/phone/pet.json
+/phone/*.spec

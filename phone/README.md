@@ -75,6 +75,29 @@ D:\WBSJ\AIPW\lol-companion\vision\.venv\Scripts\python.exe phone\pc_capture.py
 
 `/apk`、`/info`、`/fields` 都会回报当前档位，`--profile` 写错时会提示并回退到 `fields.yaml`。
 
+### 双击运行（打包成 exe）
+
+不想开命令行的话，打一个单文件 exe：
+
+```powershell
+... vision\.venv\Scripts\python.exe phone\build_exe.py
+```
+
+产物 `phone\LolCompanionPet.exe`（约 96 MB——RapidOCR 的 onnx 模型、onnxruntime、opencv 全打进去了）。
+**双击即启动**，控制台会打印手机该填的地址；关窗口或 Ctrl-C 停止。
+
+实测：双击到端口可用 **3.0 秒**，首次 OCR 结果 **3.3 秒**，单次识别 15–19 ms。
+
+三条使用要点：
+
+- **配置在 exe 旁边的 `pet.json`**（首次运行自动生成）。`profile` 选 `lol` / `valorant` / `delta`，
+  另有 `port` / `fps` / `width` / `quality` / `windowTitle`。改完重新打开生效。
+- **别把 exe 单独拷到别处**。exe 把「自己所在目录」当配置根目录，`fields.yaml`、`profiles\`、
+  `models\`、`dist\` 都得在 `phone\` 里；挪走了会退回内置默认字段，`/models` 也会变空。
+- 命令行参数仍可用，优先级高于 `pet.json`。
+
+桌面快捷方式：右键 `LolCompanionPet.exe` → 发送到 → 桌面快捷方式。
+
 ## 2. 协议
 
 ```
