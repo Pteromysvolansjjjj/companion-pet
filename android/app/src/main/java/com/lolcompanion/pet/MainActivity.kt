@@ -185,7 +185,8 @@ class MainActivity : AppCompatActivity() {
         val available = store.availableProfiles()
         val status = TextView(this).apply {
             val list = if (available.isEmpty()) "无" else available.joinToString(", ")
-            text = "已放模型的档位：$list\n自动跟随时，文件名要跟电脑的 --profile 同名\n目录：${store.dir.absolutePath}"
+            val current = prefs.lastProfile.ifBlank { "未知（连上电脑后自动识别）" }
+            text = "已放模型的档位：$list\n电脑当前档位：$current\n「换模型」会写进上面这个档位"
             setTextColor(Color.parseColor("#8EA6FF"))
             textSize = 11f
             setPadding(0, (8 * density).toInt(), 0, 0)
